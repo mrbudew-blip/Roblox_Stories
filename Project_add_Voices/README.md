@@ -1,5 +1,7 @@
 # Plantilla de historias · Roblox Studio
 
+> **Este proyecto (`Project_add_Voices`) contiene la historia «El origen del Post-it»**, sincronizada con los 11 audios de `Audio/`. Al instalar y pulsar Play se reproduce `Historia_PostIt` (~47 s). Ver [Guion.md](Guion.md), la tabla de tiempos en [Audio/Sincronizacion.md](Audio/Sincronizacion.md) y la sección **10. Historia del Post-it** al final de este documento.
+
 Proyecto base para producir vídeos cortos verticales (9:16) de historias narradas. Los personajes, escenarios, animaciones y cámaras ya están hechos: cada vídeo nuevo es **un único archivo de escena** que dice quién sale, dónde y qué hace.
 
 > Todavía no contiene ninguna historia. Solo trae la escena técnica `Prueba_Plantilla`, que recorre todos los recursos para comprobar que funcionan.
@@ -231,6 +233,23 @@ Donde un paso pide un lugar (`En`, `Hasta`, `Desde`, `A`, `MirarA`) puedes poner
 | `Musica` | `Sonido`, `Volumen`?, `Parar`? | en bucle; sustituye a la anterior |
 | `Entorno` | `Nombre` | cambia de escenario; los personajes siguen donde estaban, recolócalos |
 | `Ejecutar` | `Funcion = function(ctx) ... end` | vía de escape para casos especiales |
+| `Voz` | `Voz`, `Actor`?, `Labios`?, `LabiosHasta`?, `Gestos`?, `Volumen`? | reproduce un audio de `Modulos > Voces` y mueve la boca **al ritmo real de la voz**. Por defecto: labios en diálogos, no en narración |
+| `EsperarHasta` | `Tiempo` | espera hasta ese segundo de la escena |
+| `Expresion` | `Actor`, `Expresion`, `Duracion`? | `Sorpresa`, `Frustracion`, `Idea`, `Feliz`, `Curiosidad`, `Duda`, `Orgullo`, `Pensativo` o `Ninguna` |
+| `Postura` | `Actor`, `Postura` | gesto que se mantiene debajo de los demás (p. ej. `Mostrar` para sostener algo en alto); `Ninguna` lo quita |
+| `Sentar` / `Levantar` | `Actor`, `En` (marca `Silla_…`) | sienta al personaje con las piernas dobladas; `Levantar` (o `Colocar`) lo pone de pie |
+| `Pegar` | `Actor`, `Objeto`?, `En`, `Desplazamiento`? | pega lo que lleva en una pared (`Pared_…`, `Nota_…`) o encima de un objeto |
+| `Caer` | `Objeto`, `Hasta`?, `Tiempo`? | el objeto cae balanceándose como un papel |
+| `Aparecer` | `Objeto`, `En` | el objeto aparece con un rebote |
+| `Texto` | `Texto`, `Estilo`, `Duracion`?, `Posicion`? | `Titulo`, `Rotulo` (nota amarilla para fechas), `Icono` (emoji) o `Subtitulo`, siempre dentro del 9:16 |
+| `Fundido` | `Color`? (`"Blanco"`), `Entrada`?, `Mantener`?, `Salida`? | fundido a negro/blanco; cambia de entorno mientras la pantalla está cubierta |
+| `Filtro` | `Filtro` | `Recuerdo` (sepia, para flashbacks), `Calido` o `Ninguno` |
+
+**Línea de tiempo:** cualquier paso puede llevar `T = segundos`. Se ejecuta exactamente en ese segundo de la escena y no bloquea a los siguientes, así que los tiempos no se desvían. Es la forma recomendada para sincronizar con audio (ver `Escenas > Historia_PostIt`).
+
+**Entornos con memoria:** al cambiar de entorno, el anterior recuerda quién y qué había. Si vuelves, todo aparece donde estaba (ideal para flashbacks). En un entorno nuevo no hay nadie hasta que colocas a los personajes.
+
+**Recoger / Soltar / Pegar** eligen solos el gesto según la altura: agacharse (suelo), alcanzar (mesa) o brazo arriba (pared).
 
 Opciones de **`Camara`**: `Actor` o `Actores = {…}`, `Encuadre = "Cuerpo" | "Medio" | "Cara"`, `Angulo` (grados, + = cámara más a la derecha), `Inclinacion` (grados, + = picado), `Holgura` (1.2 = más aire), `Seguir = true`, `Transicion` (segundos), `Acercar` (studs) + `TiempoAcercar` (zoom lento), `FOV`, `Marca` (para `Fija`).
 
@@ -317,6 +336,8 @@ La composición es idéntica con cualquier tamaño de ventana: la cámara se cal
 
 | Síntoma | Causa / solución |
 |---|---|
+| `Paso N llega X s tarde` | Un paso con `T` se ejecutó más tarde de lo previsto, normalmente porque un paso sin `T` lo bloqueó antes. En las escenas con línea de tiempo pon `T` en todos los pasos. |
+| La voz no suena | Su `Id` está vacío en `Audio/voces.json`. La escena mantiene los tiempos igualmente. |
 | `No existe la escena 'X'` | El nombre en `Config.EscenaActiva` no coincide con el ModuleScript de `Escenas`. |
 | `El actor 'X' todavía no está en escena` | Falta un `Colocar` (o `Posiciones`, o `Caminar` con `Desde`) antes. |
 | `No encuentro 'X'` | Marca, actor u objeto mal escrito (distingue mayúsculas). |
@@ -326,3 +347,44 @@ La composición es idéntica con cualquier tamaño de ventana: la cámara se cal
 | Los pies "patinan" | Ajusta `Config.VelocidadCaminar/Correr` o `VelocidadReferencia` en `Animaciones.Base`. |
 | Los cambios en un módulo no se aplican desde la barra de comandos | Studio cachea `require`; usa `require(modulo:Clone())`. En Play siempre se usa la versión actual. |
 | Se ve la barra superior de Roblox | Algunas versiones no permiten ocultarla; usa el emulador de dispositivo o recórtala al editar. |
+
+---
+
+## 10. Historia del Post-it (`Historia_PostIt`)
+
+Adaptación de [Guion.md](Guion.md) en 6 escenas, ~47 s, formato 9:16.
+
+### Personajes
+| Rol / modelo | Aspecto | Personalidad |
+|---|---|---|
+| `Spencer` | delgado, bata blanca de laboratorio con bolsillo y bolígrafos, camisa azul claro, corbata granate, gafas de pasta negras, pelo castaño peinado de lado | químico entusiasta y orgulloso de su «pegamento raro» (cara `Entusiasta`) |
+| `Art` | algo más alto, chaleco mostaza sobre camisa crema, pantalón de pana marrón, entradas canosas y bigote | ingeniero curioso y práctico, canta en el coro; es el narrador (cara `Curioso`) |
+
+Están en `Modulos > DefPersonajes` junto a los tres personajes de la plantilla.
+
+### Escenarios
+| Entorno | Contenido | Marcas propias |
+|---|---|---|
+| `Laboratorio` | suelo de baldosas, zócalo verde menta, cartel «LABORATORIO DE ADHESIVOS», tablón de corcho con hojas clavadas, pizarra con fórmulas, mesa central de encimera negra con folios y probetas, banco de química con microscopio, matraces y frascos, armario de vidrio, ventana, reloj, taburetes y papelera con intentos fallidos | `Pos_TrasMesa`, `Pared_1` (corcho), `Pared_2` (pizarra), `Nota_1`…`Nota_6`, `Obj_1`…`Obj_4`, `Suelo_1`, `Cam_Tablon`, `Cam_Mesa` |
+| `SalaEnsayo` | tarima, friso de madera, vidrieras de colores, tablero de himnos, cartel «ENSAYO DEL CORO», gradas con sillas, atriles, piano vertical con banqueta, planta, y en primer término la mesa y la silla de Art con cancioneros, lámpara y papeles sueltos | `Silla_1`, `Obj_Libro`, `Obj_Papeles`, `Obj_Nota`, `Suelo_Libro`, `Cam_Mesa` |
+
+### Objetos nuevos
+`Papel`, `PapelAdhesivo` (la muestra de Spencer), `NotaAmarilla` (admite `Color` y `Texto` escrito a mano), `Marcapaginas`, `BlocNotas`, `Cancionero`, `CancioneroAbierto`, `Pegamento` (bote con pincel), `CajaNotas`.
+
+### Escenas del guion
+| # | Escenario | Qué se ve |
+|---|---|---|
+| 1 | Laboratorio | Art abre a cámara; Spencer pega su papel en el corcho y se despega; Art observa |
+| 2 | Laboratorio | Spencer presume y le da el papel a Art; Art lo pega y despega en la pizarra; «¿Y para qué sirve eso?»; Spencer se encoge de hombros |
+| 3 | Sala de ensayo (1974) | Art sentado abre el cancionero, pone un marcapáginas y se cae al suelo; «¡Otra vez no!» |
+| 4 | Sala + recuerdo | flashback en sepia de Spencer; 💡; Art pega la muestra en la página como marcapáginas |
+| 5 | Laboratorio | «¡Funciona!»; Spencer lo quita y lo vuelve a pegar; el tablón se llena de notas de colores |
+| 6 | Laboratorio (1980) | cajas de producto; Art presenta el bloc; Spencer se acerca; «¡Al final sí que servía para algo!»; título final |
+
+### Audio
+- `Audio/postit1…11.WAV`: los originales.
+- `Audio/voces.json`: qué dice cada audio, quién y en qué escena, y su `Id` de Roblox (vacío hasta que los subas).
+- `Audio/analizar_audio.py`: mide duración, tramos de voz y la curva de volumen para los labios, y genera `Audio/Voces.lua` (= `Modulos > Voces`).
+- `Audio/Sincronizacion.md`: segundo exacto en que empieza cada audio y cada acción importante.
+
+Para cambiar un audio o añadir los `Id`: edita `voces.json` o sustituye el WAV, luego ejecuta `python Audio/analizar_audio.py` y `node build.js`, y reinstala.

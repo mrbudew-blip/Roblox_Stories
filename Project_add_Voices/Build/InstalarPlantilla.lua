@@ -28,12 +28,12 @@ local Config = {}
 
 -- Escena que se reproduce al pulsar Play.
 -- Es el nombre de un ModuleScript dentro de StoryTemplate > Escenas.
-Config.EscenaActiva = "Prueba_Plantilla"
+Config.EscenaActiva = "Historia_PostIt"
 
 -- FORMATO VERTICAL ---------------------------------------------------------
 Config.Aspecto = 9 / 16 -- proporción del vídeo (ancho / alto)
 Config.BandasNegras = true -- tapa en negro todo lo que queda fuera del 9:16
-Config.MostrarGuias = true -- dibuja la zona segura. Ponlo en false para grabar
+Config.MostrarGuias = false -- dibuja la zona segura y el reloj t=. Ponlo en true para revisar el encuadre
 Config.CampoVision = 40 -- campo de visión vertical de la cámara (grados)
 Config.TransicionCamara = 0 -- transición por defecto entre planos (0 = corte)
 
@@ -42,6 +42,10 @@ Config.RetrasoInicio = 2 -- segundos de espera antes del primer paso (para empez
 Config.Repetir = false -- vuelve a empezar la escena al terminar
 Config.OcultarInterfazRoblox = true -- oculta chat, lista de jugadores, etc.
 Config.OcultarRaton = true -- oculta el cursor dentro del juego
+Config.CuentaAtras = false -- muestra 3-2-1 antes del primer paso (referencia para montar el audio)
+
+-- AUDIO --------------------------------------------------------------------
+Config.Subtitulos = false -- muestra el texto de cada voz (Modulos > Voces) abajo, en la zona segura
 
 -- MOVIMIENTO ---------------------------------------------------------------
 Config.VelocidadCaminar = 7 -- studs por segundo
@@ -58,9 +62,14 @@ return Config
 	Todo ocurre en el cliente: personajes, objetos y escenario son copias
 	locales, sin física ni red, para que el coste sea mínimo.
 
-	La lista completa de acciones está en la documentación (README.md) y en
-	Escenas > _PlantillaEscena. No hace falta editar este archivo para crear
-	escenas nuevas.
+	Dos formas de ordenar los pasos (se pueden mezclar):
+	  · Secuencial: cada paso espera a que termine el anterior (Paralelo = true para no esperar).
+	  · Línea de tiempo: un paso con  T = segundos  se ejecuta exactamente en ese segundo
+	    de la escena (contado desde el primer paso) y no bloquea a los siguientes.
+	    Es la forma recomendada para sincronizar con audio: los tiempos no se desvían.
+
+	La lista completa de acciones está en README.md. No hace falta editar este
+	archivo para crear escenas nuevas.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -68,6 +77,7 @@ local Lighting = game:GetService("Lighting")
 local SoundService = game:GetService("SoundService")
 local StarterGui = game:GetService("StarterGui")
 local UserInputService = game:GetService("UserInputService")
+local ContentProvider = game:GetService("ContentProvider")
 
 local Modulos = script.Parent
 local Raiz = Modulos.Parent
@@ -75,6 +85,20 @@ local Config = require(Raiz:WaitForChild("Config"))
 local Actor = require(Modulos:WaitForChild("Actor"))
 local Camaras = require(Modulos:WaitForChild("Camaras"))
 local Guias = require(Modulos:WaitForChild("Guias"))
+local Efectos = require(Modulos:WaitForChild("Efectos"))
+
+local Voces = nil
+do
+	local m = Modulos:FindFirstChild("Voces")
+	if m then
+		local ok, res = pcall(require, m)
+		if ok then
+			Voces = res
+		else
+			warn("[Historia] Error al leer Modulos > Voces: " .. tostring(res))
+		end
+	end
+end
 
 local NOMBRE_RENDER = "CamaraHistoria"
 
@@ -110,6 +134,17 @@ local function fijarObjeto(objeto, anclado)
 	end
 end
 
+-- Gesto adecuado para alcanzar algo según su altura respecto al personaje.
+local function gestoPorAltura(actor, y)
+	local d = y - actor.Raiz.Position.Y
+	if d > 1 then
+		return "Pegar"
+	elseif d > -1.9 then
+		return "AlcanzarMesa"
+	end
+	return "Agacharse"
+end
+
 --==============================================================================
 -- CONTEXTO: estado de la escena en reproducción
 --==============================================================================
@@ -123,7 +158,11 @@ function Contexto.new(escena)
 	self.Actores = {} -- rol -> Actor
 	self.Orden = {} -- roles en orden de aparición
 	self.Objetos = {} -- nombre -> Model
+	self.EntornoObj = {} -- Model -> nombre del entorno donde está colocado
+	self.Memoria = {} -- entorno -> { Actores, Objetos } al salir de él
 	self.Sonidos = {}
+	self.SonidosVoz = {}
+	self.Inicio = nil
 	local viejo = workspace:FindFirstChild("Escenario")
 	if viejo then
 		viejo:Destroy()
@@ -134,29 +173,54 @@ function Contexto.new(escena)
 	return self
 end
 
+-- Segundos desde el primer paso de la escena.
+function Contexto:Reloj()
+	if not self.Inicio then
+		return 0
+	end
+	return os.clock() - self.Inicio
+end
+
 -- ENTORNO ----------------------------------------------------------------------
 
+function Contexto:EnMano(objeto)
+	for _, a in pairs(self.Actores) do
+		if a.Objeto == objeto then
+			return a
+		end
+	end
+	return nil
+end
+
+--[[
+	Cambia de escenario. Cada entorno "recuerda" quién y qué había al salir:
+	al volver, los personajes y objetos aparecen donde estaban (útil para
+	flashbacks y para alternar escenarios). Al entrar en un entorno nuevo no
+	hay nadie: coloca a los personajes con Colocar / Caminar / Sentar.
+]]
 function Contexto:CargarEntorno(nombre)
 	local plantilla = Raiz.Entornos:FindFirstChild(tostring(nombre))
 	if not plantilla then
 		error(("No existe el entorno '%s' en StoryTemplate > Entornos"):format(tostring(nombre)), 0)
 	end
 	if self.Entorno then
-		self.Entorno:Destroy()
-		-- Los objetos colocados en el entorno anterior desaparecen con él
-		-- (los que lleva un personaje en la mano se quedan).
-		for _, objeto in pairs(self.Objetos) do
-			local enMano = false
-			for _, a in pairs(self.Actores) do
-				if a.Objeto == objeto then
-					enMano = true
-				end
+		local mem = { Actores = {}, Objetos = {} }
+		for _, a in pairs(self.Actores) do
+			if a.Modelo.Parent then
+				mem.Actores[a] = { CFrame = a.Raiz.CFrame, Piernas = a.PosturaPiernas }
+				self:OcultarActor(a)
 			end
-			if not enMano then
+		end
+		for _, objeto in pairs(self.Objetos) do
+			if objeto.Parent and not self:EnMano(objeto) then
+				mem.Objetos[objeto] = true
 				objeto.Parent = nil
 			end
 		end
+		self.Memoria[self.Entorno.Name] = mem
+		self.Entorno:Destroy()
 	end
+
 	local entorno = plantilla:Clone()
 	local marcas = entorno:FindFirstChild("Marcas")
 	if marcas then
@@ -172,15 +236,35 @@ function Contexto:CargarEntorno(nombre)
 	entorno.Parent = self.Carpeta
 	self.Entorno = entorno
 
-	-- Iluminación del entorno (atributos del Model). Lo que no indique vuelve
-	-- al valor original del lugar.
+	-- Iluminación y tono del entorno (atributos del Model)
 	Lighting.ClockTime = entorno:GetAttribute("Hora") or LUZ_ORIGINAL.ClockTime
 	Lighting.Brightness = entorno:GetAttribute("Brillo") or LUZ_ORIGINAL.Brightness
 	Lighting.Ambient = entorno:GetAttribute("Ambiente") or LUZ_ORIGINAL.Ambient
 	Lighting.OutdoorAmbient = entorno:GetAttribute("AmbienteExterior") or LUZ_ORIGINAL.OutdoorAmbient
+	Efectos.TonoEntorno(entorno:GetAttribute("Tinte"), entorno:GetAttribute("Saturacion"))
 
 	local audiencia = self:Marca("Audiencia")
 	self.Audiencia = audiencia and audiencia.Position or nil
+
+	-- Restaura lo que había la última vez que se estuvo aquí
+	local mem = self.Memoria[entorno.Name]
+	if mem then
+		for a, estado in pairs(mem.Actores) do
+			if not a.Modelo.Parent then
+				a:_cancelarMovimiento()
+				a.Raiz.CFrame = estado.CFrame
+				a.PosturaPiernas = estado.Piernas
+				self:Mostrar(a)
+				a:_postura(nil)
+				a:_aplicar(0)
+			end
+		end
+		for objeto in pairs(mem.Objetos) do
+			if not objeto.Parent and self.EntornoObj[objeto] == entorno.Name then
+				objeto.Parent = self.Carpeta
+			end
+		end
+	end
 end
 
 function Contexto:Marca(nombre)
@@ -235,17 +319,27 @@ end
 function Contexto:Mostrar(actor)
 	if not actor.Modelo.Parent then
 		actor.Modelo.Parent = self.Carpeta
+		if actor.Objeto then
+			actor.Objeto.Parent = self.Carpeta
+		end
 		actor:Reanudar()
+	end
+end
+
+function Contexto:OcultarActor(actor)
+	actor.Modelo.Parent = nil
+	if actor.Objeto then
+		actor.Objeto.Parent = nil
 	end
 end
 
 -- POSICIONES -------------------------------------------------------------------
 
 --[[
-	Convierte un destino en un punto del suelo. "valor" puede ser:
-	  · nombre de marca del entorno ("Pos_A", "Entrada_Izq", "Obj_1"...)
-	  · rol de un actor visible ("Protagonista") → se queda a "distancia" de él
-	  · nombre de un objeto en escena ("Caja") → se queda a "distancia" de él
+	Convierte un destino en un punto. "valor" puede ser:
+	  · nombre de marca del entorno ("Pos_A", "Entrada_Izq", "Obj_1"...) → su base
+	  · rol de un actor visible → se queda a "distancia" de él (3 por defecto)
+	  · nombre de un objeto en escena → su cara de arriba (o a "distancia" si se camina hacia él)
 	  · un Vector3
 	Devuelve: posición, marca (si era una marca)
 ]]
@@ -264,15 +358,21 @@ function Contexto:Pos(valor, desde, distancia)
 	end
 	local objeto = self.Objetos[nombre]
 	if objeto and objeto.Parent then
-		local p = objeto:GetPivot().Position
+		local cf, tam = objeto:GetBoundingBox()
 		if desde then
-			local suelo = Vector3.new(p.X, desde.Y, p.Z)
+			local suelo = Vector3.new(cf.X, desde.Y, cf.Z)
 			return suelo + plano(desde - suelo) * (distancia or 1.6), nil
 		end
-		return p, nil
+		return cf.Position + Vector3.new(0, tam.Y / 2, 0), nil
 	end
 	local marca = self:Marca(nombre)
 	if marca then
+		if marca:GetAttribute("Pared") then
+			-- Para caminar hacia una marca de pared: un punto del suelo delante de ella
+			local n = plano(marca.CFrame.LookVector)
+			local y = desde and desde.Y or 0
+			return Vector3.new(marca.Position.X, y, marca.Position.Z) + n * (distancia or 1.4), marca
+		end
 		return marca.Position - Vector3.new(0, marca.Size.Y / 2, 0), marca
 	end
 	error(
@@ -287,7 +387,6 @@ end
 -- Punto al que mirar: "Camara", un actor (su cabeza), una marca, un objeto o un Vector3.
 function Contexto:PuntoMirada(valor)
 	if valor == "Camara" then
-		-- Posición a la que va la cámara (aunque todavía no se haya dibujado)
 		local e = self.EstadoCamara
 		local ok, cf = pcall(function()
 			return e.Calcular()
@@ -301,11 +400,47 @@ function Contexto:PuntoMirada(valor)
 	if actor and actor.Modelo.Parent then
 		return actor.Raiz.Position + Vector3.new(0, actor.AlturaCabeza, 0)
 	end
+	local objeto = type(valor) == "string" and self.Objetos[valor]
+	if objeto and objeto.Parent then
+		return objeto:GetBoundingBox().Position
+	end
 	local pos, marca = self:Pos(valor)
 	if marca then
 		return marca.Position
 	end
 	return pos
+end
+
+--[[
+	Superficie sobre la que pegar o apoyar algo. Devuelve punto y normal:
+	  · marca de pared (atributo Pared) → su centro y su cara frontal
+	  · marca normal / Vector3          → hacia arriba
+	  · objeto en escena                → su cara de arriba
+]]
+function Contexto:Superficie(destino, desplazamiento)
+	local punto, normal
+	if typeof(destino) == "Vector3" then
+		punto, normal = destino, Vector3.yAxis
+	else
+		local nombre = tostring(destino)
+		local objeto = self.Objetos[nombre]
+		local marca = self:Marca(nombre)
+		if objeto and objeto.Parent then
+			local cf, tam = objeto:GetBoundingBox()
+			punto, normal = cf.Position + Vector3.new(0, tam.Y / 2, 0), Vector3.yAxis
+		elseif marca and marca:GetAttribute("Pared") then
+			normal = marca.CFrame.LookVector
+			punto = marca.Position - normal * (marca.Size.Z / 2)
+		elseif marca then
+			punto, normal = marca.Position - Vector3.new(0, marca.Size.Y / 2, 0), Vector3.yAxis
+		else
+			punto, normal = self:Pos(destino), Vector3.yAxis
+		end
+	end
+	if typeof(desplazamiento) == "Vector3" then
+		punto = punto + desplazamiento
+	end
+	return punto, normal
 end
 
 -- OBJETOS ----------------------------------------------------------------------
@@ -315,7 +450,10 @@ function Contexto:ObtenerObjeto(nombre)
 		return self.Objetos[nombre]
 	end
 	local def = (self.Escena.Objetos or {})[nombre]
-	local nombreModelo = (type(def) == "table" and def.Modelo) or nombre
+	if type(def) ~= "table" then
+		def = {}
+	end
+	local nombreModelo = def.Modelo or nombre
 	local plantilla = Raiz.Objetos:FindFirstChild(tostring(nombreModelo))
 	if not plantilla then
 		error(("No existe el objeto '%s' en StoryTemplate > Objetos"):format(tostring(nombreModelo)), 0)
@@ -333,6 +471,33 @@ function Contexto:ObtenerObjeto(nombre)
 			w.Parent = d
 		end
 	end
+	if typeof(def.Color) == "Color3" then
+		objeto.PrimaryPart.Color = def.Color
+		local franja = objeto:FindFirstChild("Franja")
+		if franja and franja:IsA("BasePart") then
+			franja.Color = def.Color:Lerp(Color3.new(0, 0, 0), 0.08)
+		end
+	end
+	-- Texto escrito a mano en la cara frontal (notas, carteles...)
+	if def.Texto then
+		local sg = Instance.new("SurfaceGui")
+		sg.Name = "Escrito"
+		sg.Face = Enum.NormalId.Front
+		sg.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+		sg.PixelsPerStud = 150
+		sg.LightInfluence = 1
+		local l = Instance.new("TextLabel")
+		l.BackgroundTransparency = 1
+		l.Size = UDim2.fromScale(0.84, 0.74)
+		l.Position = UDim2.fromScale(0.08, 0.16)
+		l.Font = Enum.Font.PermanentMarker
+		l.TextScaled = true
+		l.TextWrapped = true
+		l.TextColor3 = def.ColorTexto or Color3.fromRGB(30, 40, 110)
+		l.Text = def.Texto
+		l.Parent = sg
+		sg.Parent = objeto.PrimaryPart
+	end
 	fijarObjeto(objeto, true)
 	self.Objetos[nombre] = objeto
 	return objeto
@@ -346,16 +511,38 @@ function Contexto:QuitarDeManos(objeto)
 	end
 end
 
-function Contexto:ColocarObjeto(nombre, donde)
-	local objeto = self:ObtenerObjeto(nombre)
+--[[
+	Coloca un objeto en una superficie.
+	  · Pared: la cara frontal del objeto queda hacia fuera.
+	  · Horizontal y objeto "Plano" (hojas, notas): tumbado, con el texto legible desde la cámara.
+	  · Horizontal y objeto normal: de pie, mirando hacia "direccion".
+]]
+function Contexto:FijarEnSuperficie(objeto, punto, normal, direccion)
 	self:QuitarDeManos(objeto)
-	local pos, marca = self:Pos(donde)
 	fijarObjeto(objeto, true)
-	local dir = marca and plano(marca.CFrame.LookVector) or Vector3.new(0, 0, -1)
-	objeto:PivotTo(CFrame.lookAt(pos, pos + dir))
-	local cf, tam = objeto:GetBoundingBox()
-	objeto:PivotTo(objeto:GetPivot() + Vector3.new(0, pos.Y - (cf.Position.Y - tam.Y / 2), 0))
+	local tam = objeto:GetExtentsSize()
+	local esPlano = objeto:GetAttribute("Plano") == true
+	if math.abs(normal.Y) < 0.7 then
+		objeto:PivotTo(CFrame.lookAt(punto, punto + normal) + normal * (tam.Z / 2 + 0.01))
+	elseif esPlano then
+		local arriba = direccion and -plano(direccion) or Vector3.new(0, 0, -1)
+		objeto:PivotTo(CFrame.lookAt(punto, punto + Vector3.yAxis, arriba) + Vector3.new(0, tam.Z / 2 + 0.01, 0))
+	else
+		local dir = direccion and plano(direccion) or Vector3.new(0, 0, -1)
+		objeto:PivotTo(CFrame.lookAt(punto, punto + dir))
+		local cf, t = objeto:GetBoundingBox()
+		objeto:PivotTo(objeto:GetPivot() + Vector3.new(0, punto.Y - (cf.Position.Y - t.Y / 2), 0))
+	end
 	objeto.Parent = self.Carpeta
+	self.EntornoObj[objeto] = self.Entorno and self.Entorno.Name
+end
+
+function Contexto:ColocarObjeto(nombre, donde, desplazamiento)
+	local objeto = self:ObtenerObjeto(nombre)
+	local punto, normal = self:Superficie(donde, desplazamiento)
+	local marca = type(donde) == "string" and self:Marca(donde)
+	self:FijarEnSuperficie(objeto, punto, normal, marca and marca.CFrame.LookVector or nil)
+	return objeto
 end
 
 function Contexto:DarObjeto(nombre, actor)
@@ -363,6 +550,73 @@ function Contexto:DarObjeto(nombre, actor)
 	self:QuitarDeManos(objeto)
 	objeto.Parent = self.Carpeta
 	actor:Sostener(objeto)
+	return objeto
+end
+
+-- Hace caer un objeto hasta el suelo (o hasta "destino") con vaivén de papel.
+function Contexto:Caer(objeto, destino, tiempo)
+	self:QuitarDeManos(objeto)
+	fijarObjeto(objeto, true)
+	objeto.Parent = self.Carpeta
+	local azar = Random.new()
+	local inicio = objeto:GetPivot()
+	local punto
+	if destino then
+		punto = self:Superficie(destino)
+	else
+		punto = Vector3.new(inicio.X + azar:NextNumber(-0.5, 0.5), 0, inicio.Z + azar:NextNumber(0.4, 0.9))
+	end
+	local tam = objeto:GetExtentsSize()
+	local giro = math.rad(azar:NextNumber(-35, 35))
+	local final
+	if objeto:GetAttribute("Plano") then
+		local arriba = CFrame.Angles(0, giro, 0):VectorToWorldSpace(Vector3.new(0, 0, -1))
+		final = CFrame.lookAt(punto, punto + Vector3.yAxis, arriba) + Vector3.new(0, tam.Z / 2 + 0.01, 0)
+	else
+		final = CFrame.new(punto + Vector3.new(0, tam.Y / 2, 0)) * CFrame.Angles(0, giro, 0)
+	end
+	tiempo = tiempo or 0.9
+	self.EntornoObj[objeto] = self.Entorno and self.Entorno.Name
+	task.spawn(function()
+		local t0 = os.clock()
+		while objeto.Parent do
+			local a = math.min((os.clock() - t0) / tiempo, 1)
+			local pos = inicio.Position:Lerp(final.Position, a)
+			pos = Vector3.new(pos.X, inicio.Y + (final.Y - inicio.Y) * a * a, pos.Z)
+			local vaiven = math.sin(a * math.pi * 3) * 0.35 * (1 - a)
+			local rot = inicio.Rotation:Lerp(final.Rotation, math.min(1, a * 1.3))
+			objeto:PivotTo(CFrame.new(pos + Vector3.new(vaiven, 0, 0)) * rot * CFrame.Angles(vaiven * 0.8, 0, vaiven))
+			if a >= 1 then
+				break
+			end
+			RunService.Heartbeat:Wait()
+		end
+		objeto:PivotTo(final)
+	end)
+	return tiempo
+end
+
+-- Aparece un objeto con un pequeño rebote (ideal para notas que "brotan").
+function Contexto:Aparecer(nombre, donde, desplazamiento)
+	local objeto = self:ColocarObjeto(nombre, donde, desplazamiento)
+	local ok = pcall(function()
+		objeto:ScaleTo(0.05)
+	end)
+	if ok then
+		task.spawn(function()
+			local t0 = os.clock()
+			while objeto.Parent do
+				local a = math.min((os.clock() - t0) / 0.28, 1)
+				local e = a < 0.7 and (a / 0.7) * 1.15 or 1.15 - (a - 0.7) / 0.3 * 0.15
+				objeto:ScaleTo(math.max(0.05, e))
+				if a >= 1 then
+					break
+				end
+				RunService.Heartbeat:Wait()
+			end
+			objeto:ScaleTo(1)
+		end)
+	end
 	return objeto
 end
 
@@ -406,6 +660,47 @@ function Contexto:Duracion(sonido)
 	return sonido.TimeLength / math.max(sonido.PlaybackSpeed, 0.01)
 end
 
+-- Sonido de una voz de Modulos > Voces (se precarga al empezar la escena).
+function Contexto:SonidoVoz(nombre)
+	if self.SonidosVoz[nombre] then
+		return self.SonidosVoz[nombre]
+	end
+	local datos = Voces and Voces[nombre]
+	if not datos or not datos.Id or datos.Id == "" then
+		return nil
+	end
+	local s = Instance.new("Sound")
+	s.Name = "Voz_" .. nombre
+	s.SoundId = datos.Id
+	s.Volume = 1
+	s.Parent = SoundService
+	self.SonidosVoz[nombre] = s
+	table.insert(self.Sonidos, s)
+	return s
+end
+
+function Contexto:PrecargarVoces()
+	if not Voces then
+		return
+	end
+	local lista = {}
+	for nombre, datos in pairs(Voces) do
+		if type(datos) == "table" then
+			local s = self:SonidoVoz(nombre)
+			if s then
+				table.insert(lista, s)
+			end
+		end
+	end
+	if #lista > 0 then
+		task.spawn(function()
+			pcall(function()
+				ContentProvider:PreloadAsync(lista)
+			end)
+		end)
+	end
+end
+
 -- CÁMARA -----------------------------------------------------------------------
 
 function Contexto:IniciarCamara()
@@ -419,6 +714,9 @@ function Contexto:IniciarCamara()
 	}
 	RunService:UnbindFromRenderStep(NOMBRE_RENDER)
 	RunService:BindToRenderStep(NOMBRE_RENDER, Enum.RenderPriority.Camera.Value + 1, function()
+		if self.Inicio then
+			Guias.Tiempo(self:Reloj(), self.Etiqueta)
+		end
 		local e = self.EstadoCamara
 		local ok, objetivo = pcall(e.Calcular)
 		if not ok or typeof(objetivo) ~= "CFrame" then
@@ -467,18 +765,26 @@ function Contexto:Destruir()
 	for _, s in ipairs(self.Sonidos) do
 		s:Destroy()
 	end
+	Efectos.Filtro(nil)
+	Efectos.TonoEntorno(nil)
+	Efectos.Limpiar()
 	self.Carpeta:Destroy()
 end
 
 --==============================================================================
 -- ACCIONES: cada una devuelve los segundos que dura (el Director espera ese
--- tiempo salvo que el paso tenga Paralelo = true).
+-- tiempo salvo que el paso tenga Paralelo = true o T = segundos).
 --==============================================================================
 
 local Acciones = {}
 
 Acciones.Esperar = function(_, p)
 	return p.Tiempo or p[2] or 1
+end
+
+-- Espera hasta el segundo "Tiempo" de la escena (contado desde el primer paso).
+Acciones.EsperarHasta = function(ctx, p)
+	return math.max(0, (p.Tiempo or p[2] or 0) - ctx:Reloj())
 end
 
 Acciones.Colocar = function(ctx, p)
@@ -495,8 +801,32 @@ end
 Acciones.Ocultar = function(ctx, p)
 	local actor = ctx.Actores[p.Actor]
 	if actor then
-		actor.Modelo.Parent = nil
+		ctx:OcultarActor(actor)
 	end
+	return 0
+end
+
+-- Sienta a un actor en una marca de asiento (Silla_...).
+Acciones.Sentar = function(ctx, p)
+	local actor = ctx:ObtenerActor(p.Actor)
+	local punto = ctx:Superficie(p.En or p.Marca)
+	local marca = ctx:Marca(p.En or p.Marca)
+	ctx:Mostrar(actor)
+	actor:Sentar(punto, marca and marca.CFrame.LookVector or nil)
+	return 0
+end
+
+-- Levanta a un actor sentado y lo deja de pie en "En" (o justo delante del asiento).
+Acciones.Levantar = function(ctx, p)
+	local actor = ctx:ActorVisible(p.Actor)
+	local pos, marca
+	if p.En then
+		pos, marca = ctx:Pos(p.En)
+	else
+		local r = actor.Raiz.Position
+		pos = Vector3.new(r.X, 0, r.Z) + plano(actor.Raiz.CFrame.LookVector) * 1.4
+	end
+	actor:Colocar(pos, marca and marca.CFrame.LookVector or actor.Raiz.CFrame.LookVector)
 	return 0
 end
 
@@ -546,6 +876,25 @@ Acciones.Gesto = function(ctx, p)
 	return ctx:ActorVisible(p.Actor):Gesto(p.Gesto, p.Duracion, p.Mantener)
 end
 
+-- Gesto de reposo que se mantiene debajo de los demás ("Ninguna" para quitarlo).
+Acciones.Postura = function(ctx, p)
+	local nombre = p.Postura
+	if nombre == "Ninguna" then
+		nombre = nil
+	end
+	ctx:ActorVisible(p.Actor):FijarPostura(nombre)
+	return 0
+end
+
+Acciones.Expresion = function(ctx, p)
+	local nombre = p.Expresion
+	if nombre == "Ninguna" then
+		nombre = nil
+	end
+	ctx:ActorVisible(p.Actor):Expresion(nombre, p.Duracion)
+	return 0
+end
+
 Acciones.Hablar = function(ctx, p)
 	local actor = ctx:ActorVisible(p.Actor)
 	local duracion = p.Duracion
@@ -564,11 +913,63 @@ Acciones.Hablar = function(ctx, p)
 	return actor:Gesto("Hablar", duracion)
 end
 
+--[[
+	Reproduce una voz de Modulos > Voces y sincroniza los labios con su volumen.
+	  Voz         = nombre de la voz ("postit1")
+	  Actor       = rol que habla (por defecto, el Personaje de la voz si es Dialogo)
+	  Labios      = mover la boca (por defecto: sí en Dialogo, no en Narrador)
+	  LabiosHasta = segundos de labios (p. ej. solo la primera frase)
+	  Gestos      = true → además gesticula con las manos
+]]
+Acciones.Voz = function(ctx, p)
+	local nombre = p.Voz
+	local datos = Voces and Voces[nombre]
+	if type(datos) ~= "table" then
+		error(("No existe la voz '%s' en Modulos > Voces"):format(tostring(nombre)), 0)
+	end
+	local duracion = datos.Duracion
+	local s = ctx:SonidoVoz(nombre)
+	if s then
+		if p.Volumen then
+			s.Volume = p.Volumen
+		end
+		s.TimePosition = 0
+		s:Play()
+	end
+	local rol = p.Actor
+	if rol == nil and datos.Tipo ~= "Narrador" then
+		rol = datos.Personaje
+	end
+	local labios = p.Labios
+	if labios == nil then
+		labios = datos.Tipo ~= "Narrador"
+	end
+	if rol and labios then
+		local actor = ctx.Actores[rol]
+		if actor and actor.Modelo.Parent then
+			actor:MoverBocaEnvolvente(datos.Envolvente, Voces.Paso, p.LabiosHasta)
+			if p.Gestos then
+				actor:Gesto("Hablar", p.LabiosHasta or duracion)
+			end
+		end
+	end
+	if Config.Subtitulos and datos.Texto and datos.Texto ~= "" then
+		Efectos.Texto(datos.Texto, "Subtitulo", duracion)
+	end
+	ctx.Etiqueta = nombre
+	print(("[Historia] t = %6.2f s  ▶ %s (%.2f s) %s"):format(ctx:Reloj(), nombre, duracion, s and "" or "[sin Id: silencio]"))
+	return duracion
+end
+
 Acciones.Senalar = function(ctx, p)
 	local actor = ctx:ActorVisible(p.Actor)
 	local giro = 0
 	if p.A then
-		giro = actor:MirarHacia(ctx:PuntoMirada(p.A))
+		if actor.PosturaPiernas then
+			actor:MirarCabeza(ctx:PuntoMirada(p.A))
+		else
+			giro = actor:MirarHacia(ctx:PuntoMirada(p.A))
+		end
 	end
 	local duracion = p.Duracion or 1.5
 	task.delay(giro, function()
@@ -578,7 +979,10 @@ Acciones.Senalar = function(ctx, p)
 end
 
 Acciones.Sorpresa = function(ctx, p)
-	return ctx:ActorVisible(p.Actor):Gesto("Sorpresa", p.Duracion, p.Mantener)
+	local actor = ctx:ActorVisible(p.Actor)
+	local duracion = actor:Gesto("Sorpresa", p.Duracion, p.Mantener)
+	actor:Expresion("Sorpresa", (not p.Mantener) and duracion + 0.3 or nil)
+	return duracion
 end
 
 Acciones.Animacion = function(ctx, p)
@@ -616,22 +1020,30 @@ Acciones.Entregar = function(ctx, p)
 	return 2
 end
 
+-- Coge un objeto (del suelo, de una mesa o de una pared: elige el gesto según la altura).
 Acciones.Recoger = function(ctx, p)
 	local actor = ctx:ActorVisible(p.Actor)
 	local objeto = ctx:ObtenerObjeto(p.Objeto)
 	local giro = 0
+	local gesto = p.Gesto
 	if objeto.Parent then
-		giro = actor:MirarHacia(objeto:GetPivot().Position)
+		local pos = objeto:GetBoundingBox().Position
+		gesto = gesto or gestoPorAltura(actor, pos.Y)
+		if not actor.PosturaPiernas then
+			giro = actor:MirarHacia(pos)
+		end
 	end
+	gesto = gesto or "Agacharse"
 	task.spawn(function()
 		task.wait(giro)
-		actor:Gesto("Agacharse", 0.8)
-		task.wait(0.5)
+		actor:Gesto(gesto, 0.8)
+		task.wait(0.45)
 		ctx:DarObjeto(p.Objeto, actor)
 	end)
-	return giro + 1.2
+	return giro + 1.1
 end
 
+-- Deja lo que lleva en la mano en "En" (o lo hace desaparecer si no hay En).
 Acciones.Soltar = function(ctx, p)
 	local actor = ctx:ActorVisible(p.Actor)
 	local objeto = actor.Objeto
@@ -639,17 +1051,61 @@ Acciones.Soltar = function(ctx, p)
 		return 0
 	end
 	if p.En then
-		local donde = p.En
+		local donde, desp = p.En, p.Desplazamiento
+		local punto = ctx:Superficie(donde, desp)
+		local gesto = p.Gesto or gestoPorAltura(actor, punto.Y)
 		task.spawn(function()
-			actor:Gesto("Agacharse", 0.7)
+			actor:Gesto(gesto, 0.7)
 			task.wait(0.45)
-			ctx:ColocarObjeto(objeto.Name, donde)
+			ctx:ColocarObjeto(objeto.Name, donde, desp)
 		end)
 		return 1
 	end
 	actor:Soltar()
 	objeto.Parent = nil
 	return 0
+end
+
+-- Pega lo que lleva en la mano (u Objeto) en una pared o encima de otro objeto.
+Acciones.Pegar = function(ctx, p)
+	local actor = ctx:ActorVisible(p.Actor)
+	local objeto
+	if p.Objeto then
+		objeto = ctx:ObtenerObjeto(p.Objeto)
+		if actor.Objeto ~= objeto then
+			ctx:DarObjeto(p.Objeto, actor)
+		end
+	else
+		objeto = actor.Objeto
+	end
+	if not objeto then
+		error(("Pegar: '%s' no lleva nada en la mano; indica Objeto = \"...\""):format(tostring(p.Actor)), 0)
+	end
+	local punto, normal = ctx:Superficie(p.En, p.Desplazamiento)
+	local giro = 0
+	if not actor.PosturaPiernas then
+		giro = actor:MirarHacia(punto)
+	end
+	local gesto = p.Gesto or gestoPorAltura(actor, punto.Y)
+	task.spawn(function()
+		task.wait(giro)
+		actor:Gesto(gesto, 0.8)
+		task.wait(0.45)
+		ctx:FijarEnSuperficie(objeto, punto, normal, actor.Raiz.CFrame.LookVector * -1)
+	end)
+	return giro + 1
+end
+
+-- Un objeto cae al suelo (o a "Hasta") balanceándose como un papel.
+Acciones.Caer = function(ctx, p)
+	local objeto = ctx:ObtenerObjeto(p.Objeto)
+	return ctx:Caer(objeto, p.Hasta, p.Tiempo)
+end
+
+-- Un objeto aparece de golpe con un rebote en "En".
+Acciones.Aparecer = function(ctx, p)
+	ctx:Aparecer(p.Objeto, p.En or p.Marca, p.Desplazamiento)
+	return 0.3
 end
 
 Acciones.Objeto = function(ctx, p)
@@ -665,12 +1121,32 @@ Acciones.Objeto = function(ctx, p)
 		ctx:DarObjeto(p.Objeto, ctx:ActorVisible(p.EnManoDe))
 		return 0
 	end
-	ctx:ColocarObjeto(p.Objeto, p.En or p.Marca)
+	ctx:ColocarObjeto(p.Objeto, p.En or p.Marca, p.Desplazamiento)
 	return 0
 end
 
 Acciones.Camara = function(ctx, p)
 	ctx:Camara(p)
+	return 0
+end
+
+Acciones.Texto = function(_, p)
+	Efectos.Texto(p.Texto, p.Estilo, p.Duracion, {
+		Posicion = p.Posicion,
+		Tamano = p.Tamano,
+		Color = p.Color,
+		Giro = p.Giro,
+	})
+	return 0
+end
+
+-- Fundido a negro (o Color = "Blanco"). Devuelve el tiempo hasta cubrir la pantalla.
+Acciones.Fundido = function(_, p)
+	return Efectos.Fundido(p.Color, p.Entrada, p.Mantener, p.Salida)
+end
+
+Acciones.Filtro = function(_, p)
+	Efectos.Filtro(p.Filtro)
 	return 0
 end
 
@@ -722,12 +1198,21 @@ local function ejecutarPaso(ctx, paso, i)
 		warn(("[Historia] Paso %d: acción desconocida '%s'"):format(i, tostring(nombre)))
 		return
 	end
+	if type(paso.T) == "number" and ctx.Inicio then
+		local espera = paso.T - ctx:Reloj()
+		if espera > 0 then
+			task.wait(espera)
+		elseif espera < -0.15 then
+			warn(("[Historia] Paso %d (%s) llega %.2f s tarde: T = %.2f"):format(i, tostring(nombre), -espera, paso.T))
+		end
+	end
 	local ok, duracion = pcall(accion, ctx, paso)
 	if not ok then
 		warn(("[Historia] Paso %d (%s): %s"):format(i, tostring(nombre), tostring(duracion)))
 		return
 	end
-	if not paso.Paralelo and type(duracion) == "number" and duracion > 0 then
+	local bloquea = not paso.Paralelo and (paso.T == nil or paso.Esperar == true)
+	if bloquea and type(duracion) == "number" and duracion > 0 then
 		task.wait(duracion)
 	end
 	if type(paso.Pausa) == "number" and paso.Pausa > 0 then
@@ -742,7 +1227,11 @@ local function preparar(ctx, escena)
 	local posiciones = escena.Posiciones or {}
 	for rol, def in pairs(posiciones) do
 		local d = type(def) == "table" and def or { Marca = def }
-		Acciones.Colocar(ctx, { Actor = rol, En = d.Marca or d.En })
+		if d.Sentado then
+			Acciones.Sentar(ctx, { Actor = rol, En = d.Sentado })
+		else
+			Acciones.Colocar(ctx, { Actor = rol, En = d.Marca or d.En })
+		end
 	end
 
 	ctx:Camara(escena.Camara or { Plano = "General" })
@@ -751,6 +1240,9 @@ local function preparar(ctx, escena)
 		if type(def) == "table" and def.MirarA then
 			ctx:ActorVisible(rol):MirarHacia(ctx:PuntoMirada(def.MirarA), 0)
 		end
+		if type(def) == "table" and def.Expresion then
+			ctx:ActorVisible(rol):Expresion(def.Expresion)
+		end
 	end
 
 	for nombre, def in pairs(escena.Objetos or {}) do
@@ -758,9 +1250,10 @@ local function preparar(ctx, escena)
 		if d.EnManoDe then
 			ctx:DarObjeto(nombre, ctx:ActorVisible(d.EnManoDe))
 		elseif d.En or d.Marca then
-			ctx:ColocarObjeto(nombre, d.En or d.Marca)
+			ctx:ColocarObjeto(nombre, d.En or d.Marca, d.Desplazamiento)
 		end
 	end
+	ctx:PrecargarVoces()
 end
 
 local function esperarPersonajes()
@@ -797,6 +1290,20 @@ local function prepararInterfaz()
 	end
 end
 
+-- Cuenta atrás 3-2-1 antes del primer paso (referencia para montar el audio).
+local function cuentaAtras(retraso)
+	local n = math.min(3, math.floor(retraso))
+	if not Config.CuentaAtras or n < 1 then
+		task.wait(retraso)
+		return
+	end
+	task.wait(retraso - n)
+	for k = n, 1, -1 do
+		Efectos.Texto(tostring(k), "Icono", 0.8, { Posicion = Vector2.new(0.5, 0.45), Tamano = Vector2.new(0.4, 0.25) })
+		task.wait(1)
+	end
+end
+
 function Director.Reproducir(nombreEscena)
 	esperarPersonajes()
 	local modulo = Raiz.Escenas:FindFirstChild(tostring(nombreEscena))
@@ -828,8 +1335,9 @@ function Director.Reproducir(nombreEscena)
 			warn("[Historia] Error preparando la escena: " .. tostring(err))
 		end
 		print(("[Historia] Escena '%s' lista. Empieza en %s s"):format(modulo.Name, tostring(Config.RetrasoInicio)))
-		task.wait(Config.RetrasoInicio or 0)
+		cuentaAtras(Config.RetrasoInicio or 0)
 
+		ctx.Inicio = os.clock()
 		if escena.Musica then
 			local paso = { Accion = "Musica" }
 			for k, v in pairs(escena.Musica) do
@@ -840,7 +1348,7 @@ function Director.Reproducir(nombreEscena)
 		for i, paso in ipairs(escena.Pasos or {}) do
 			ejecutarPaso(ctx, paso, i)
 		end
-		print(("[Historia] Escena '%s' terminada"):format(modulo.Name))
+		print(("[Historia] Escena '%s' terminada (%.2f s)"):format(modulo.Name, ctx:Reloj()))
 
 		if Config.Repetir then
 			task.wait(2)
@@ -880,7 +1388,21 @@ local ARTICULACIONES = {
 	LeftShoulder = true,
 	LeftElbow = true,
 	LeftWrist = true,
+	RightHip = true,
+	LeftHip = true,
+	RightKnee = true,
+	LeftKnee = true,
 }
+
+-- Atuendos se carga al usarse (expresiones de la cara)
+local cacheAtuendos = nil
+local function Atuendos()
+	if not cacheAtuendos then
+		local m = script.Parent:FindFirstChild("Atuendos")
+		cacheAtuendos = m and require(m) or false
+	end
+	return cacheAtuendos or nil
+end
 
 local function plano(v)
 	local p = Vector3.new(v.X, 0, v.Z)
@@ -930,6 +1452,8 @@ function Actor.new(modelo, rol)
 	self.Rotaciones = {}
 	self.GiroCabeza = 0
 	self.Postura = nil -- gesto de reposo (p. ej. "Sostener" cuando lleva algo)
+	self.PosturaManual = nil -- gesto de reposo fijado desde la escena (acción "Postura")
+	self.PosturaPiernas = nil -- postura de piernas ("Sentado")
 	self.TokenGesto = 0
 	self.TokenMovimiento = 0
 	self.Objeto = nil
@@ -970,6 +1494,16 @@ function Actor.new(modelo, rol)
 	-- Anchura relativa al R15 estándar (torso de 2 studs): la usan las cámaras
 	local torso = modelo:FindFirstChild("UpperTorso")
 	self.EscalaAncho = torso and math.max(torso.Size.X / 2, 0.5) or 1
+	-- Altura de la cadera respecto a la raíz y grosor del muslo (para sentarse)
+	local cadera3d = self.Motores.RightHip
+	if cadera3d and cadera3d.Part0 then
+		self.AlturaCadera = (cadera3d.Part0.CFrame * cadera3d.C0).Position.Y - raiz.Position.Y
+	end
+	if not self.AlturaCadera or self.AlturaCadera > 0 or self.AlturaCadera < -2.5 then
+		self.AlturaCadera = -self.AlturaRaiz / 3
+	end
+	local muslo = modelo:FindFirstChild("RightUpperLeg")
+	self.GrosorMuslo = muslo and muslo.Size.Z or 1
 
 	-- Animaciones
 	local animator = humanoid:FindFirstChildOfClass("Animator")
@@ -1081,6 +1615,83 @@ function Actor:MoverBoca(duracion)
 	return duracion
 end
 
+--[[
+	Mueve la boca siguiendo la envolvente de volumen de un audio (Modulos > Voces):
+	una cadena de cifras 0-9, una cada "paso" segundos. "hasta" limita los segundos
+	(por ejemplo, para mover los labios solo en la primera frase).
+]]
+function Actor:MoverBocaEnvolvente(envolvente, paso, hasta)
+	local cara = self.Cara
+	local reposo = cara and cara:FindFirstChild("BocaReposo")
+	local habla = cara and cara:FindFirstChild("BocaHabla")
+	if not reposo or not habla or not envolvente then
+		return 0
+	end
+	paso = paso or 0.05
+	local total = #envolvente * paso
+	if hasta then
+		total = math.min(total, hasta)
+	end
+	self.TokenBoca = self.TokenBoca + 1
+	local token = self.TokenBoca
+	task.spawn(function()
+		local inicio = os.clock()
+		local ultimo = -1
+		while self.TokenBoca == token and cara.Parent do
+			local t = os.clock() - inicio
+			if t >= total then
+				break
+			end
+			local i = math.floor(t / paso) + 1
+			if i ~= ultimo then
+				ultimo = i
+				local v = (tonumber(envolvente:sub(i, i)) or 0) / 9
+				if v < 0.3 then
+					reposo.Visible = true
+					habla.Visible = false
+				else
+					reposo.Visible = false
+					habla.Visible = true
+					TweenService:Create(habla, TweenInfo.new(paso), {
+						Size = UDim2.fromScale(0.12 + 0.1 * v, 0.03 + 0.14 * v),
+					}):Play()
+				end
+			end
+			task.wait()
+		end
+		if self.TokenBoca == token then
+			reposo.Visible = true
+			habla.Visible = false
+		end
+	end)
+	return total
+end
+
+-- Cambia la expresión de la cara (Atuendos.Expresiones). duracion = nil → se mantiene.
+-- nombre = nil → vuelve a la cara base.
+function Actor:Expresion(nombre, duracion)
+	local A = Atuendos()
+	if not self.Cara or not A then
+		return 0
+	end
+	self.TokenExpresion = (self.TokenExpresion or 0) + 1
+	local token = self.TokenExpresion
+	local parpado = A.Expresar(self.Cara, nombre)
+	for _, p in ipairs(self.Parpados or {}) do
+		local alto = parpado or p:GetAttribute("AltoBase") or 0.06
+		p:SetAttribute("Alto", alto)
+		TweenService:Create(p, TweenInfo.new(0.15), { Size = UDim2.fromScale(1.2, alto) }):Play()
+	end
+	if duracion and nombre then
+		task.delay(duracion, function()
+			if self.TokenExpresion == token then
+				self:Expresion(nil)
+			end
+		end)
+	end
+	return 0
+end
+
 -- POSICIÓN ---------------------------------------------------------------------
 
 function Actor:PosicionSuelo()
@@ -1107,10 +1718,36 @@ end
 -- Coloca al personaje de pie sobre un punto del suelo, mirando en "direccion".
 function Actor:Colocar(posSuelo, direccion)
 	self:_cancelarMovimiento()
+	-- Colocar deja al personaje de pie y en su postura de reposo
+	self.PosturaPiernas = nil
+	self.TokenGesto = self.TokenGesto + 1
+	self:_postura(nil)
+	self:_aplicar(0)
 	local pos = posSuelo + Vector3.new(0, self.AlturaRaiz, 0)
 	local dir = plano(direccion or self.Raiz.CFrame.LookVector)
 	self.Raiz.CFrame = CFrame.lookAt(pos, pos + dir)
 	self:Base("Quieto")
+end
+
+-- Sienta al personaje: "asiento" es el punto central de la superficie del asiento.
+function Actor:Sentar(asiento, direccion)
+	self:_cancelarMovimiento()
+	local dir = plano(direccion or self.Raiz.CFrame.LookVector)
+	local y = asiento.Y - self.AlturaCadera + self.GrosorMuslo / 2
+	-- la cadera queda un poco hacia el respaldo
+	local pos = Vector3.new(asiento.X, y, asiento.Z) - dir * 0.25
+	self.Raiz.CFrame = CFrame.lookAt(pos, pos + dir)
+	self.PosturaPiernas = "Sentado"
+	self:Base("Quieto")
+	self:_postura(nil)
+	self:_aplicar(0)
+end
+
+-- Fija (o quita con nil) un gesto de reposo que se mantiene debajo de los demás gestos.
+function Actor:FijarPostura(nombre, tiempo)
+	self.PosturaManual = nombre
+	self:_postura(nil)
+	self:_aplicar(tiempo or 0.3)
 end
 
 -- Gira el cuerpo hacia una dirección horizontal. Devuelve la duración.
@@ -1118,6 +1755,10 @@ function Actor:Girar(direccion, tiempo)
 	tiempo = tiempo or 0.35
 	local pos = self.Raiz.Position
 	local objetivo = CFrame.lookAt(pos, pos + plano(direccion))
+	-- Si ya mira hacia ahí (menos de 10 grados), no gasta tiempo en girar
+	if tiempo > 0 and self.Raiz.CFrame.LookVector:Dot(objetivo.LookVector) > 0.985 then
+		return 0
+	end
 	if tiempo <= 0 then
 		if self.Tween then
 			self.Tween:Cancel()
@@ -1212,7 +1853,14 @@ end
 
 function Actor:_postura(fotograma)
 	local rot = {}
-	local reposo = self.Postura and Animaciones.Gestos[self.Postura]
+	local piernas = self.PosturaPiernas and Animaciones.Piernas and Animaciones.Piernas[self.PosturaPiernas]
+	if piernas then
+		for k, v in pairs(piernas) do
+			rot[k] = aVector(v)
+		end
+	end
+	local nombreReposo = self.PosturaManual or self.Postura
+	local reposo = nombreReposo and Animaciones.Gestos[nombreReposo]
 	if reposo then
 		for k, v in pairs(reposo.Fotogramas[1]) do
 			rot[k] = aVector(v)
@@ -1367,6 +2015,435 @@ function Actor:Soltar(sinAplicar)
 end
 
 return Actor
+]=======] },
+	{ Ruta = "StoryTemplate/Modulos", Nombre = "Efectos", Clase = "ModuleScript", Fuente = [=======[
+--[[
+	EFECTOS · Textos en pantalla, fundidos y filtros de color
+	Studio: ReplicatedStorage > StoryTemplate > Modulos > Efectos
+
+	Todo se dibuja dentro del área 9:16 (Guias.Lienzo), así que nunca se sale
+	del encuadre vertical. Lo usan las acciones "Texto", "Fundido" y "Filtro".
+
+	ESTILOS DE TEXTO
+	  Titulo     → letras grandes amarillas con borde negro (frase final, ganchos)
+	  Rotulo     → nota adhesiva amarilla torcida (fechas, lugares: "1974")
+	  Icono      → emoji que rebota (💡, ❗, ❓)
+	  Subtitulo  → texto blanco abajo, en la zona reservada
+
+	FILTROS
+	  Recuerdo   → tonos sepia y apagados (flashbacks)
+	  Calido     → luz de tarde
+	  Ninguno    → quita el filtro
+]]
+
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+
+local Guias = require(script.Parent:WaitForChild("Guias"))
+
+local Efectos = {}
+
+local AMARILLO = Color3.fromRGB(255, 222, 60)
+
+local function tween(obj, t, props, estilo, direccion)
+	local tw = TweenService:Create(obj, TweenInfo.new(t, estilo or Enum.EasingStyle.Quad, direccion or Enum.EasingDirection.Out), props)
+	tw:Play()
+	return tw
+end
+
+local function etiqueta(padre, texto, fuente, color)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Size = UDim2.fromScale(1, 1)
+	l.Font = fuente
+	l.TextScaled = true
+	l.TextWrapped = true
+	l.TextColor3 = color
+	l.Text = texto
+	l.Parent = padre
+	return l
+end
+
+-- Entrada con rebote (escala 0 → 1.12 → 1)
+local function aparecer(obj)
+	local escala = Instance.new("UIScale")
+	escala.Scale = 0
+	escala.Parent = obj
+	local t1 = tween(escala, 0.18, { Scale = 1.12 }, Enum.EasingStyle.Back)
+	t1.Completed:Connect(function()
+		tween(escala, 0.1, { Scale = 1 })
+	end)
+	return escala
+end
+
+-- Desvanece todos los textos, fondos y bordes de "obj" y lo destruye.
+local function desvanecer(obj, t)
+	t = t or 0.25
+	for _, d in ipairs(obj:GetDescendants()) do
+		if d:IsA("TextLabel") then
+			tween(d, t, { TextTransparency = 1, TextStrokeTransparency = 1, BackgroundTransparency = 1 })
+		elseif d:IsA("Frame") then
+			tween(d, t, { BackgroundTransparency = 1 })
+		elseif d:IsA("UIStroke") then
+			tween(d, t, { Transparency = 1 })
+		end
+	end
+	if obj:IsA("Frame") then
+		tween(obj, t, { BackgroundTransparency = 1 })
+	end
+	task.delay(t + 0.05, function()
+		obj:Destroy()
+	end)
+end
+
+--[[
+	Muestra un texto. op (opcional):
+	  Posicion = Vector2 (escala 0-1 del área 9:16)
+	  Tamano   = Vector2 (escala)
+	  Color    = Color3
+	  Giro     = grados
+	Devuelve el objeto creado. Si duracion es nil se queda hasta Efectos.Limpiar().
+]]
+function Efectos.Texto(texto, estilo, duracion, op)
+	local lienzo = Guias.Lienzo
+	if not lienzo then
+		return nil
+	end
+	op = op or {}
+	estilo = estilo or "Titulo"
+	local raiz
+
+	if estilo == "Rotulo" then
+		local pos = op.Posicion or Vector2.new(0.5, 0.11)
+		local tam = op.Tamano or Vector2.new(0.38, 0.1)
+		raiz = Instance.new("Frame")
+		raiz.BackgroundTransparency = 1
+		raiz.AnchorPoint = Vector2.new(0.5, 0.5)
+		raiz.Position = UDim2.fromScale(pos.X, pos.Y)
+		raiz.Size = UDim2.fromScale(tam.X, tam.Y)
+		raiz.Rotation = op.Giro or -4
+		raiz.ZIndex = 20
+		local sombra = Instance.new("Frame")
+		sombra.Size = UDim2.fromScale(1, 1)
+		sombra.Position = UDim2.new(0, 5, 0, 6)
+		sombra.BackgroundColor3 = Color3.new(0, 0, 0)
+		sombra.BackgroundTransparency = 0.7
+		sombra.BorderSizePixel = 0
+		sombra.ZIndex = 1
+		sombra.Parent = raiz
+		local nota = Instance.new("Frame")
+		nota.Size = UDim2.fromScale(1, 1)
+		nota.BackgroundColor3 = op.Color or AMARILLO
+		nota.BorderSizePixel = 0
+		nota.ZIndex = 2
+		nota.Parent = raiz
+		local banda = Instance.new("Frame")
+		banda.Size = UDim2.fromScale(1, 0.14)
+		banda.BackgroundColor3 = (op.Color or AMARILLO):Lerp(Color3.new(0.6, 0.45, 0), 0.25)
+		banda.BorderSizePixel = 0
+		banda.ZIndex = 1
+		banda.Parent = nota
+		local margen = Instance.new("Frame")
+		margen.BackgroundTransparency = 1
+		margen.Size = UDim2.fromScale(0.86, 0.72)
+		margen.Position = UDim2.fromScale(0.07, 0.2)
+		margen.ZIndex = 2
+		margen.Parent = nota
+		etiqueta(margen, texto, Enum.Font.PermanentMarker, Color3.fromRGB(55, 40, 20))
+	elseif estilo == "Icono" then
+		raiz = Instance.new("Frame")
+		raiz.BackgroundTransparency = 1
+		raiz.AnchorPoint = Vector2.new(0.5, 0.5)
+		local pos = op.Posicion or Vector2.new(0.5, 0.2)
+		local tam = op.Tamano or Vector2.new(0.22, 0.12)
+		raiz.Position = UDim2.fromScale(pos.X, pos.Y)
+		raiz.Size = UDim2.fromScale(tam.X, tam.Y)
+		raiz.ZIndex = 20
+		local l = etiqueta(raiz, texto, Enum.Font.GothamBold, Color3.new(1, 1, 1))
+		l.ZIndex = 21
+	elseif estilo == "Subtitulo" then
+		raiz = Instance.new("Frame")
+		raiz.BackgroundTransparency = 1
+		raiz.AnchorPoint = Vector2.new(0.5, 0.5)
+		raiz.Position = UDim2.fromScale(0.5, 0.91)
+		raiz.Size = UDim2.fromScale(0.9, 0.09)
+		raiz.ZIndex = 20
+		local l = etiqueta(raiz, texto, Enum.Font.GothamBold, Color3.new(1, 1, 1))
+		l.TextStrokeTransparency = 0
+		l.ZIndex = 21
+	else -- Titulo
+		raiz = Instance.new("Frame")
+		raiz.BackgroundTransparency = 1
+		raiz.AnchorPoint = Vector2.new(0.5, 0.5)
+		local pos = op.Posicion or Vector2.new(0.5, 0.3)
+		local tam = op.Tamano or Vector2.new(0.92, 0.2)
+		raiz.Position = UDim2.fromScale(pos.X, pos.Y)
+		raiz.Size = UDim2.fromScale(tam.X, tam.Y)
+		raiz.Rotation = op.Giro or -3
+		raiz.ZIndex = 20
+		local l = etiqueta(raiz, texto, Enum.Font.FredokaOne, op.Color or AMARILLO)
+		l.ZIndex = 21
+		local borde = Instance.new("UIStroke")
+		borde.Color = Color3.fromRGB(20, 15, 10)
+		borde.Thickness = 4
+		borde.Parent = l
+	end
+
+	raiz.Name = "Texto_" .. estilo
+	raiz.Parent = lienzo
+	if estilo ~= "Subtitulo" then
+		aparecer(raiz)
+	end
+	if estilo == "Icono" then
+		-- pequeño rebote continuo
+		task.spawn(function()
+			local base = raiz.Position
+			while raiz.Parent do
+				tween(raiz, 0.35, { Position = base - UDim2.fromScale(0, 0.012) }, Enum.EasingStyle.Sine)
+				task.wait(0.35)
+				if not raiz.Parent then
+					break
+				end
+				tween(raiz, 0.35, { Position = base }, Enum.EasingStyle.Sine)
+				task.wait(0.35)
+			end
+		end)
+	end
+	if duracion then
+		task.delay(duracion, function()
+			if raiz.Parent then
+				desvanecer(raiz)
+			end
+		end)
+	end
+	return raiz
+end
+
+-- Quita todos los textos que haya en pantalla.
+function Efectos.Limpiar()
+	if not Guias.Lienzo then
+		return
+	end
+	for _, hijo in ipairs(Guias.Lienzo:GetChildren()) do
+		if hijo.Name:sub(1, 6) == "Texto_" then
+			desvanecer(hijo, 0.15)
+		end
+	end
+end
+
+--[[
+	Fundido a un color y vuelta. Devuelve el tiempo hasta que la pantalla está
+	totalmente cubierta (entrada + mantener): en ese momento se puede cambiar de
+	entorno sin que se note. La salida ocurre sola después.
+]]
+function Efectos.Fundido(color, entrada, mantener, salida)
+	local velo = Guias.Velo
+	if not velo then
+		return 0
+	end
+	entrada = entrada or 0.3
+	mantener = mantener or 0.1
+	salida = salida or 0.35
+	if color == "Blanco" then
+		velo.BackgroundColor3 = Color3.new(1, 1, 1)
+	elseif typeof(color) == "Color3" then
+		velo.BackgroundColor3 = color
+	else
+		velo.BackgroundColor3 = Color3.new(0, 0, 0)
+	end
+	velo.BackgroundTransparency = 1
+	tween(velo, entrada, { BackgroundTransparency = 0 }, Enum.EasingStyle.Sine)
+	task.delay(entrada + mantener, function()
+		tween(velo, salida, { BackgroundTransparency = 1 }, Enum.EasingStyle.Sine)
+	end)
+	return entrada + mantener
+end
+
+local FILTROS = {
+	Recuerdo = { Saturation = -0.65, Contrast = 0.12, Brightness = 0.04, TintColor = Color3.fromRGB(255, 226, 180) },
+	Calido = { Saturation = 0.05, Contrast = 0.05, Brightness = 0.02, TintColor = Color3.fromRGB(255, 238, 215) },
+}
+
+-- Aplica (o quita con "Ninguno"/nil) un filtro de color a toda la imagen.
+function Efectos.Filtro(nombre)
+	local cc = Lighting:FindFirstChild("FiltroHistoria")
+	local def = FILTROS[nombre or ""]
+	if not def then
+		if cc then
+			cc:Destroy()
+		end
+		return
+	end
+	if not cc then
+		cc = Instance.new("ColorCorrectionEffect")
+		cc.Name = "FiltroHistoria"
+		cc.Parent = Lighting
+	end
+	for k, v in pairs(def) do
+		cc[k] = v
+	end
+end
+
+-- Tono de color propio de cada entorno (atributos Tinte / Saturacion del Model).
+function Efectos.TonoEntorno(tinte, saturacion)
+	local cc = Lighting:FindFirstChild("TonoEntorno")
+	if not tinte and not saturacion then
+		if cc then
+			cc:Destroy()
+		end
+		return
+	end
+	if not cc then
+		cc = Instance.new("ColorCorrectionEffect")
+		cc.Name = "TonoEntorno"
+		cc.Parent = Lighting
+	end
+	cc.TintColor = tinte or Color3.new(1, 1, 1)
+	cc.Saturation = saturacion or 0
+end
+
+return Efectos
+]=======] },
+	{ Ruta = "StoryTemplate/Modulos", Nombre = "Voces", Clase = "ModuleScript", Fuente = [=======[
+--[[
+	VOCES · Datos de cada audio de la historia
+	Studio: ReplicatedStorage > StoryTemplate > Modulos > Voces
+
+	GENERADO por Audio/analizar_audio.py a partir de Audio/voces.json y los WAV.
+	No lo edites a mano: cambia voces.json (por ejemplo el Id) y vuelve a ejecutar
+	  python Audio/analizar_audio.py  y  node build.js
+
+	Id         → id del audio subido a Roblox ("rbxassetid://..."). Vacío = sin sonido,
+	             pero la escena mantiene los mismos tiempos (útil para montar el audio después).
+	Duracion   → segundos del archivo.
+	Segmentos  → tramos con voz { inicio, fin } en segundos desde el inicio del audio.
+	Envolvente → volumen cada Paso segundos (0-9) para mover la boca.
+]]
+
+return {
+	Paso = 0.05,
+	postit1 = {
+		Archivo = "postit1.WAV",
+		Id = "rbxassetid://112400743441885",
+		Personaje = "Art",
+		Tipo = "Narrador",
+		Escena = 1,
+		Duracion = 4.203,
+		Texto = "¿Te interesa saber cómo se creó el primer Post-it? ¡Todo comenzó con un pegamento que parecía un fracaso!",
+		Segmentos = { { 0.18, 1.96 }, { 2.38, 4.08 } },
+		Envolvente = "1116978876588996310887574999837895893262201111069968875968879867777758757968838733100",
+	},
+	postit2 = {
+		Archivo = "postit2.WAV",
+		Id = "rbxassetid://73048597437669",
+		Personaje = "Spencer",
+		Tipo = "Dialogo",
+		Escena = 2,
+		Duracion = 4.203,
+		Texto = "¡He creado un pegamento especial! Se pega, pero puedes quitarlo sin problemas.",
+		Segmentos = { { 0.52, 1.82 }, { 2.0, 4.1 } },
+		Envolvente = "0000002211783799886476655375264477742111486996982167725976442786564454466755444212210",
+	},
+	postit3 = {
+		Archivo = "postit3.WAV",
+		Id = "rbxassetid://121842356559664",
+		Personaje = "Art",
+		Tipo = "Dialogo",
+		Escena = 2,
+		Duracion = 1.3,
+		Texto = "¿Y para qué sirve eso?",
+		Segmentos = { { 0.36, 1.2 } },
+		Envolvente = "000011184886396597997475200",
+	},
+	postit4 = {
+		Archivo = "postit4.WAV",
+		Id = "rbxassetid://135160250082727",
+		Personaje = "Art",
+		Tipo = "Narrador",
+		Escena = 3,
+		Duracion = 4.04,
+		Texto = "En 1974 tenía un problema: ¡mis marcapáginas siempre acababan en el suelo!",
+		Segmentos = { { 0.28, 1.94 }, { 2.26, 3.94 } },
+		Envolvente = "000114999889878758878689487779985999774111110799797787538956997877899776658986410",
+	},
+	postit5 = {
+		Archivo = "postit5.WAV",
+		Id = "rbxassetid://140254214115431",
+		Personaje = "Art",
+		Tipo = "Dialogo",
+		Escena = 3,
+		Duracion = 1.068,
+		Texto = "¡Otra vez no!",
+		Segmentos = { { 0.26, 0.94 } },
+		Envolvente = "0011188798966899885110",
+	},
+	postit6 = {
+		Archivo = "postit6.WAV",
+		Id = "rbxassetid://7474276044230",
+		Personaje = "Art",
+		Tipo = "Narrador",
+		Escena = 4,
+		Duracion = 2.879,
+		Texto = "Entonces recordé aquel extraño pegamento y tuve una idea.",
+		Segmentos = { { 0.32, 2.8 } },
+		Envolvente = "0000113787599998778897786387748879876488876517897778987410",
+	},
+	postit7 = {
+		Archivo = "postit7.WAV",
+		Id = "rbxassetid://118988480490208",
+		Personaje = "Art",
+		Tipo = "Dialogo",
+		Escena = 4,
+		Duracion = 2.113,
+		Texto = "¡Espera! ¿Y si lo utilizo para crear un marcapáginas?",
+		Segmentos = { { 0.22, 1.84 } },
+		Envolvente = "0011772988465875968798489878663956763201100",
+	},
+	postit8 = {
+		Archivo = "postit8.WAV",
+		Id = "rbxassetid://79697612206428",
+		Personaje = "Art",
+		Tipo = "Dialogo",
+		Escena = 5,
+		Duracion = 2.879,
+		Texto = "¡Funciona! ¡No se cae y puedo quitarlo sin romper nada!",
+		Segmentos = { { 0.16, 1.0 }, { 1.36, 2.64 } },
+		Envolvente = "1116979966327785988511110016999983895688875586867988411100",
+	},
+	postit9 = {
+		Archivo = "postit9.WAV",
+		Id = "rbxassetid://105692879107754",
+		Personaje = "Art",
+		Tipo = "Narrador",
+		Escena = 5,
+		Duracion = 5.433,
+		Texto = "Después empezamos a utilizarlos para dejar mensajes. ¡Habíamos encontrado algo mucho más útil que un simple marcapáginas!",
+		Segmentos = { { 0.22, 2.08 }, { 2.5, 3.86 }, { 4.02, 5.24 } },
+		Envolvente = "0011563967758858576796964268974877569568540112222189885777689977774886586798521129999977698888676773677541110",
+	},
+	postit10 = {
+		Archivo = "postit10.WAV",
+		Id = "rbxassetid://131840630034624",
+		Personaje = "Art",
+		Tipo = "Narrador",
+		Escena = 6,
+		Duracion = 8.754,
+		Texto = "En 1980 llegaron oficialmente a las tiendas como Post-it. ¡Y todo gracias a un pegamento que parecía inútil!",
+		Segmentos = { { 0.36, 1.46 }, { 1.72, 3.62 }, { 4.24, 6.4 }, { 7.36, 8.58 } },
+		Envolvente = "00001117888999956978584876885101104999888666598788679886369887278729842732100001100018689797895767876898788677418387648987772664100000000000002211157468644784655465466653331200",
+	},
+	postit11 = {
+		Archivo = "postit11.WAV",
+		Id = "rbxassetid://117221469329445",
+		Personaje = "Spencer",
+		Tipo = "Dialogo",
+		Escena = 6,
+		Duracion = 1.649,
+		Texto = "¡Al final sí que servía para algo!",
+		Segmentos = { { 0.24, 1.48 } },
+		Envolvente = "232116757965589575646646776443120",
+	},
+}
 ]=======] },
 	{ Ruta = "StoryTemplate/Modulos", Nombre = "Animaciones", Clase = "ModuleScript", Fuente = [=======[
 --[[
@@ -1536,6 +2613,115 @@ Animaciones.Gestos = {
 		Fotogramas = {
 			{ RightShoulder = { 40, 0, -10 }, RightElbow = { 125, 0, 0 }, Neck = { 8, 10, 0 } },
 		},
+	},
+	-- Brazo estirado hacia delante y arriba: pegar o despegar algo de una pared
+	Pegar = {
+		Transicion = 0.3,
+		Duracion = 0.9,
+		Fotogramas = {
+			{ RightShoulder = { 105, 0, 0 }, RightElbow = { 10, 0, 0 }, Neck = { 8, 0, 0 } },
+		},
+	},
+
+	-- Alcanzar algo de una mesa (de pie o sentado)
+	AlcanzarMesa = {
+		Transicion = 0.3,
+		Duracion = 0.8,
+		Fotogramas = {
+			{ RightShoulder = { 55, 0, 0 }, RightElbow = { 25, 0, 0 }, Waist = { -12, 0, 0 }, Neck = { -15, 0, 0 } },
+		},
+	},
+
+	-- Enseñar un objeto que lleva en la mano (a la altura de la cara)
+	Mostrar = {
+		Transicion = 0.3,
+		Duracion = 1.5,
+		Fotogramas = {
+			{ RightShoulder = { 80, 0, 12 }, RightElbow = { 70, 0, 0 }, Neck = { -4, 0, 0 } },
+		},
+	},
+
+	-- Mirar con atención algo que tiene en la mano
+	Examinar = {
+		Transicion = 0.35,
+		Duracion = 1.5,
+		Fotogramas = {
+			{ RightShoulder = { 65, 0, -8 }, RightElbow = { 85, 0, 0 }, Neck = { -10, 0, 8 } },
+		},
+	},
+
+	-- ¡Idea! Dedo índice arriba junto a la cara
+	Idea = {
+		Transicion = 0.18,
+		Duracion = 1.4,
+		Fotogramas = {
+			{ RightShoulder = { 70, 0, 20 }, RightElbow = { 100, 0, 0 }, Neck = { 10, 0, 0 }, Waist = { 4, 0, 0 } },
+		},
+	},
+
+	-- Encogerse de hombros, palmas hacia arriba
+	Encogerse = {
+		Transicion = 0.25,
+		Duracion = 1,
+		Fotogramas = {
+			{
+				RightShoulder = { 20, 0, 35 },
+				LeftShoulder = { 20, 0, -35 },
+				RightElbow = { 80, 0, 0 },
+				LeftElbow = { 80, 0, 0 },
+				Neck = { 0, 0, 8 },
+			},
+		},
+	},
+
+	-- Cabeza y torso hacia abajo (mirar al suelo)
+	MirarAbajo = {
+		Transicion = 0.35,
+		Duracion = 1.2,
+		Fotogramas = {
+			{ Neck = { -30, 0, 0 }, Waist = { -10, 0, 0 } },
+		},
+	},
+
+	-- Lamentarse: mano izquierda a la frente, cabeza baja
+	Lamentarse = {
+		Transicion = 0.3,
+		Duracion = 1.2,
+		Fotogramas = {
+			{ LeftShoulder = { 100, 0, -15 }, LeftElbow = { 115, 0, 0 }, Neck = { -18, 0, 0 } },
+		},
+	},
+
+	-- Celebrar con el brazo derecho en alto
+	BrazoArriba = {
+		Transicion = 0.22,
+		Duracion = 1.2,
+		Fotogramas = {
+			{ RightShoulder = { 160, 0, 10 }, RightElbow = { 10, 0, 0 }, Neck = { 8, 0, 0 } },
+		},
+	},
+
+	-- Untar pegamento con un pincel (bucle)
+	Untar = {
+		Bucle = true,
+		Transicion = 0.22,
+		Duracion = 2,
+		Fotogramas = {
+			{ RightShoulder = { 50, 0, -5 }, RightElbow = { 40, 0, 0 }, Waist = { -10, 0, 0 }, Neck = { -18, 0, 0 } },
+			{ RightShoulder = { 45, 0, 12 }, RightElbow = { 52, 0, 0 }, Waist = { -10, 0, 0 }, Neck = { -18, 0, 0 } },
+		},
+	},
+}
+
+-- 4) POSTURAS DE PIERNAS --------------------------------------------------------
+-- Se mantienen debajo de cualquier gesto (acción "Sentar" / "Levantar").
+-- Articulaciones: RightHip, LeftHip (X+ = muslo hacia delante), RightKnee, LeftKnee (X- = dobla la rodilla).
+Animaciones.Piernas = {
+	Sentado = {
+		RightHip = { 90, 0, 0 },
+		LeftHip = { 90, 0, 0 },
+		RightKnee = { -90, 0, 0 },
+		LeftKnee = { -90, 0, 0 },
 	},
 }
 
@@ -1841,6 +3027,7 @@ function Guias.Crear(config, margenes)
 	gui.IgnoreGuiInset = true
 	gui.ResetOnSpawn = false
 	gui.DisplayOrder = 100
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 	local barras = {}
 	for i = 1, 4 do
@@ -1852,6 +3039,42 @@ function Guias.Crear(config, margenes)
 		f.Parent = gui
 		barras[i] = f
 	end
+
+	-- Lienzo: el área 9:16 exacta, donde se colocan los rótulos y textos
+	local lienzo = Instance.new("Frame")
+	lienzo.Name = "Lienzo"
+	lienzo.BackgroundTransparency = 1
+	lienzo.ClipsDescendants = true
+	lienzo.ZIndex = 5
+	lienzo.Parent = gui
+	Guias.Lienzo = lienzo
+
+	-- Velo para fundidos (cubre toda la pantalla)
+	local velo = Instance.new("Frame")
+	velo.Name = "Velo"
+	velo.Size = UDim2.fromScale(1, 1)
+	velo.BackgroundColor3 = Color3.new(0, 0, 0)
+	velo.BackgroundTransparency = 1
+	velo.BorderSizePixel = 0
+	velo.ZIndex = 50
+	velo.Parent = gui
+	Guias.Velo = velo
+
+	-- Reloj de la escena (solo con las guías activas): ayuda a comprobar la sincronización
+	local reloj = Instance.new("TextLabel")
+	reloj.Name = "Reloj"
+	reloj.BackgroundColor3 = Color3.new(0, 0, 0)
+	reloj.BackgroundTransparency = 0.4
+	reloj.TextColor3 = Color3.fromRGB(0, 255, 140)
+	reloj.Font = Enum.Font.Code
+	reloj.TextSize = 14
+	reloj.Size = UDim2.fromOffset(150, 20)
+	reloj.Position = UDim2.fromOffset(6, 6)
+	reloj.Text = ""
+	reloj.Visible = config.MostrarGuias == true
+	reloj.ZIndex = 40
+	reloj.Parent = lienzo
+	Guias.Reloj = reloj
 
 	local zona = Instance.new("Frame")
 	zona.Name = "ZonaSegura"
@@ -1884,6 +3107,8 @@ function Guias.Crear(config, margenes)
 		barras[3].Size = UDim2.fromOffset(w, y)
 		barras[4].Position = UDim2.fromOffset(x, y + h)
 		barras[4].Size = UDim2.fromOffset(w, vp.Y - y - h)
+		lienzo.Position = UDim2.fromOffset(x, y)
+		lienzo.Size = UDim2.fromOffset(w, h)
 		zona.Position = UDim2.fromOffset(x + w * margenes.Lateral, y + h * margenes.Superior)
 		zona.Size = UDim2.fromOffset(w * (1 - 2 * margenes.Lateral), h * (1 - margenes.Superior - margenes.Inferior))
 	end
@@ -1891,7 +3116,15 @@ function Guias.Crear(config, margenes)
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(actualizar)
 
 	gui.Parent = jugador:WaitForChild("PlayerGui")
+	Guias.Gui = gui
 	return gui
+end
+
+-- Actualiza el reloj de la escena (segundos desde el primer paso).
+function Guias.Tiempo(t, texto)
+	if Guias.Reloj and Guias.Reloj.Visible then
+		Guias.Reloj.Text = string.format(" t = %6.2f s %s", t, texto or "")
+	end
 end
 
 return Guias
@@ -1911,13 +3144,14 @@ return Guias
 	  Cuerpo       → { Altura, Anchura, Profundidad, Cabeza }  (1 = normal)
 	  Cara         → nombre de Atuendos.Caras, tabla { Ojos, Cejas, Boca, Mejillas, Pecas }
 	                 o id numérico de una cara del catálogo
-	  Pelo         → { Estilo = "Corto" | "Despeinado" | "Rapado" | "Ninguno", Color }
+	  Pelo         → { Estilo = "Corto" | "Despeinado" | "Rapado" | "Raya" | "Entradas" | "Ninguno", Color }
 	  Superior     → { Prenda = "Camiseta" | "MangaLarga" | "Sudadera" | "Polo" | "Tirantes"
-	                            | "Chaqueta" | "CamisetaRayas", Color, ColorDetalle }
+	                            | "Chaqueta" | "CamisetaRayas" | "Camisa" | "Bata"
+	                            | "ChalecoCamisa", Color, ColorDetalle }
 	  Inferior     → { Prenda = "Pantalon" | "Corto", Color }
 	  Calzado      → Color3
-	  Accesorios   → lista de { Tipo = "Gorra" | "GorraAtras" | "Gafas" | "Barba" | "Cinturon"
-	                                  | "Barriga" | "Mochila", Color }
+	  Accesorios   → lista de { Tipo = "Gorra" | "GorraAtras" | "Gafas" | "GafasSol" | "Barba"
+	                                  | "Bigote" | "Corbata" | "Cinturon" | "Barriga" | "Mochila", Color }
 
 	Las prendas son básicas a propósito (sudadera, camiseta, pantalón largo, gorra)
 	para que sirvan en casi cualquier historia: casa, calle, colegio, trabajo...
@@ -1976,6 +3210,45 @@ return {
 			{ Tipo = "Barriga" },
 		},
 	},
+
+	--==========================================================================
+	-- HISTORIA: EL ORIGEN DEL POST-IT
+	--==========================================================================
+
+	-- Spencer: químico joven y entusiasta, orgulloso de su "pegamento raro".
+	-- Bata blanca de laboratorio sobre camisa azul clara, corbata granate,
+	-- gafas de pasta negras y pelo castaño peinado de lado (años 70).
+	Spencer = {
+		Personalidad = "Químico entusiasta y optimista, orgulloso de su invento",
+		Piel = rgb(240, 208, 185),
+		Cuerpo = { Altura = 1.0, Anchura = 0.85, Profundidad = 0.85, Cabeza = 1 },
+		Cara = "Entusiasta",
+		Pelo = { Estilo = "Raya", Color = rgb(72, 48, 32) },
+		Superior = { Prenda = "Bata", Color = rgb(246, 246, 242), ColorDetalle = rgb(150, 185, 215) },
+		Inferior = { Prenda = "Pantalon", Color = rgb(72, 74, 82) },
+		Calzado = rgb(40, 32, 28),
+		Accesorios = {
+			{ Tipo = "Gafas", Color = rgb(25, 22, 22) },
+			{ Tipo = "Corbata", Color = rgb(125, 35, 40) },
+		},
+	},
+
+	-- Art: ingeniero curioso y práctico que canta en el coro (narrador).
+	-- Algo mayor: entradas canosas y bigote. Chaleco mostaza sobre camisa crema
+	-- y pantalón de pana marrón, muy de los años 70.
+	Art = {
+		Personalidad = "Ingeniero curioso y práctico; canta en el coro",
+		Piel = rgb(232, 196, 170),
+		Cuerpo = { Altura = 1.06, Anchura = 1.0, Profundidad = 1.0, Cabeza = 1 },
+		Cara = "Curioso",
+		Pelo = { Estilo = "Entradas", Color = rgb(128, 108, 88) },
+		Superior = { Prenda = "ChalecoCamisa", Color = rgb(184, 128, 46), ColorDetalle = rgb(245, 238, 220) },
+		Inferior = { Prenda = "Pantalon", Color = rgb(110, 74, 45) },
+		Calzado = rgb(62, 40, 26),
+		Accesorios = {
+			{ Tipo = "Bigote", Color = rgb(112, 88, 64) },
+		},
+	},
 }
 ]=======] },
 	{ Ruta = "StoryTemplate/Modulos", Nombre = "Atuendos", Clase = "ModuleScript", Fuente = [=======[
@@ -1993,21 +3266,26 @@ return {
 	  Caras predefinidas : Timido, Seguro, Alegre, Neutral, Serio
 	  Ojos   : tabla { Iris = Color3, Parpado = 0..0.6, ParpadoInferior = 0..0.4, Tamano = 1 }
 	           (ojos detallados que parpadean solos)
-	  Cejas  : Normales, Gruesas, Preocupadas, Arqueadas, Ninguna
-	  Boca   : Sonrisa, SonrisaPequena, SonrisaAbierta, MediaSonrisa, Seria, O
+	  Cejas  : Normales, Gruesas, Preocupadas, Arqueadas, Levantadas, Enfadadas, Ninguna
+	  Boca   : Sonrisa, SonrisaPequena, SonrisaAbierta, MediaSonrisa, Seria, Triste, O
 	           (al hablar se cambia por una boca que se abre y se cierra)
 
 	Pelo (Pelo = { Estilo = "...", Color = Color3 })
-	  Corto, Despeinado, Rapado, Ninguno
+	  Corto, Despeinado, Rapado, Raya (peinado de lado con patillas), Entradas (pelo en retirada), Ninguno
+
+	Expresiones (acción "Expresion" de las escenas; cambian cejas, boca y párpados un rato)
+	  Sorpresa, Frustracion, Idea, Feliz, Curiosidad, Orgullo, Pensativo, Duda
 
 	Prendas superiores (Superior = { Prenda = "...", Color = Color3, ColorDetalle = Color3 })
-	  Camiseta, MangaLarga, Sudadera, Polo, Tirantes, Chaqueta, CamisetaRayas
+	  Camiseta, MangaLarga, Sudadera, Polo, Tirantes, Chaqueta, CamisetaRayas,
+	  Camisa, Bata (bata de laboratorio; ColorDetalle = camisa), ChalecoCamisa (ColorDetalle = camisa)
 
 	Prendas inferiores (Inferior = { Prenda = "...", Color = Color3 })
 	  Pantalon, Corto
 
 	Accesorios (Accesorios = { { Tipo = "...", Color = Color3 }, ... })
-	  Gorra, GorraAtras, Gafas, Barba, Cinturon, Barriga, Mochila
+	  Gorra, GorraAtras, Gafas (montura dibujada en la cara), GafasSol, Barba, Bigote,
+	  Corbata, Cinturon, Barriga, Mochila
 ]]
 
 local Atuendos = {}
@@ -2108,6 +3386,29 @@ Atuendos.Caras = {
 		Cejas = "Gruesas",
 		Boca = "Seria",
 	},
+	Entusiasta = {
+		Ojos = { Iris = Color3.fromRGB(105, 120, 60), Parpado = 0.02, Tamano = 1.05 },
+		Cejas = "Arqueadas",
+		Boca = "Sonrisa",
+	},
+	Curioso = {
+		Ojos = { Iris = Color3.fromRGB(70, 120, 170), Parpado = 0.14 },
+		Cejas = "Normales",
+		Boca = "SonrisaPequena",
+	},
+}
+
+-- Expresiones temporales: se superponen a la cara base (ver Atuendos.Expresar).
+-- Parpado = cuánto baja el párpado superior (0 = ojos muy abiertos).
+Atuendos.Expresiones = {
+	Sorpresa = { Cejas = "Levantadas", Boca = "O", Parpado = 0 },
+	Frustracion = { Cejas = "Enfadadas", Boca = "Triste", Parpado = 0.3 },
+	Idea = { Cejas = "Levantadas", Boca = "Sonrisa", Parpado = 0 },
+	Feliz = { Cejas = "Arqueadas", Boca = "SonrisaAbierta" },
+	Curiosidad = { Cejas = "Preocupadas", Boca = "Seria", Parpado = 0.08 },
+	Duda = { Cejas = "Preocupadas", Boca = "MediaSonrisa", Parpado = 0.2 },
+	Orgullo = { Cejas = "Normales", Boca = "MediaSonrisa", Parpado = 0.3 },
+	Pensativo = { Cejas = "Gruesas", Boca = "Seria", Parpado = 0.28 },
 }
 
 -- Rectángulo (o pastilla/círculo si redondo) centrado en "x, y" (escala 0-1 del padre).
@@ -2211,6 +3512,7 @@ local function ojo(g, nombre, x, y, op, piel, haciaDentro)
 	p.BorderSizePixel = 0
 	p.ZIndex = 6
 	p:SetAttribute("Alto", alto)
+	p:SetAttribute("AltoBase", alto)
 	p.Parent = cont
 
 	local pestanas = forma(p, 0.5, 1, 0.86, 0, PESTANAS, true, 0, 0, 7)
@@ -2229,6 +3531,8 @@ local CEJAS = {
 	Gruesas = { Giro = 7, Y = 0.28, Grosor = 0.06 },
 	Preocupadas = { Giro = -16, Y = 0.25, Grosor = 0.035 },
 	Arqueadas = { Giro = -9, Y = 0.22, Grosor = 0.04 },
+	Levantadas = { Giro = -4, Y = 0.18, Grosor = 0.04 },
+	Enfadadas = { Giro = 18, Y = 0.29, Grosor = 0.05 },
 }
 
 local BOCAS = {
@@ -2249,6 +3553,9 @@ local BOCAS = {
 	end,
 	Seria = function(g, y)
 		forma(g, 0.5, y, 0.22, 0.03, OSCURO, true)
+	end,
+	Triste = function(g, y)
+		arco(g, 0.5, y + 0.04, 0.22, 0.1, false, OSCURO, 3)
 	end,
 	O = function(g, y)
 		forma(g, 0.5, y, 0.1, 0.13, Color3.fromRGB(90, 25, 30), true)
@@ -2272,6 +3579,17 @@ local function bocaHabla(g, y)
 	local lengua = forma(b, 0.5, 1.15, 0.6, 0.5, Color3.fromRGB(220, 90, 100), true, 0, 0, 2)
 	lengua.AnchorPoint = Vector2.new(0.5, 1)
 	return b
+end
+
+-- Contenedor transparente a pantalla completa de la cara (agrupa piezas).
+local function capa(padre, nombre, visible)
+	local f = Instance.new("Frame")
+	f.Name = nombre
+	f.Size = UDim2.fromScale(1, 1)
+	f.BackgroundTransparency = 1
+	f.Visible = visible ~= false
+	f.Parent = padre
+	return f
 end
 
 function Atuendos.CrearCara(cabeza, def)
@@ -2301,19 +3619,20 @@ function Atuendos.CrearCara(cabeza, def)
 	ojo(g, "OjoIzq", 0.33, 0.45, ojos, piel, 1)
 	ojo(g, "OjoDer", 0.67, 0.45, ojos, piel, -1)
 
-	local ceja = CEJAS[def.Cejas or "Normales"]
-	if ceja then
-		forma(g, 0.33, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, ceja.Giro)
-		forma(g, 0.67, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, -ceja.Giro)
+	local cejasBase = def.Cejas or "Normales"
+	for nombre, ceja in pairs(CEJAS) do
+		local grupo = capa(g, "Cejas_" .. nombre, nombre == cejasBase)
+		forma(grupo, 0.33, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, ceja.Giro)
+		forma(grupo, 0.67, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, -ceja.Giro)
 	end
+	g:SetAttribute("CejasBase", cejasBase)
 
-	local reposo = Instance.new("Frame")
-	reposo.Name = "BocaReposo"
-	reposo.Size = UDim2.fromScale(1, 1)
-	reposo.BackgroundTransparency = 1
-	reposo.Parent = g
-	local boca = BOCAS[def.Boca or "SonrisaPequena"] or BOCAS.SonrisaPequena
-	boca(reposo, 0.69)
+	local reposo = capa(g, "BocaReposo", true)
+	local bocaBase = BOCAS[def.Boca or ""] and def.Boca or "SonrisaPequena"
+	for nombre, dibujar in pairs(BOCAS) do
+		dibujar(capa(reposo, "Boca_" .. nombre, nombre == bocaBase), 0.69)
+	end
+	g:SetAttribute("BocaBase", bocaBase)
 	bocaHabla(g, 0.71)
 
 	if def.Mejillas then
@@ -2331,6 +3650,52 @@ function Atuendos.CrearCara(cabeza, def)
 
 	g.Parent = cabeza
 	return g
+end
+
+--[[
+	Aplica una expresión a una cara creada por CrearCara (nil = vuelve a la cara base).
+	expresion = nombre de Atuendos.Expresiones o tabla { Cejas, Boca, Parpado }.
+	Devuelve la altura de párpado que hay que usar (la anima el Actor).
+]]
+function Atuendos.Expresar(cara, expresion)
+	if type(expresion) == "string" then
+		expresion = Atuendos.Expresiones[expresion]
+	end
+	expresion = expresion or {}
+	local cejas = expresion.Cejas or cara:GetAttribute("CejasBase")
+	local boca = expresion.Boca or cara:GetAttribute("BocaBase")
+	for _, hijo in ipairs(cara:GetChildren()) do
+		if hijo.Name:sub(1, 6) == "Cejas_" then
+			hijo.Visible = hijo.Name == "Cejas_" .. tostring(cejas)
+		end
+	end
+	local reposo = cara:FindFirstChild("BocaReposo")
+	if reposo then
+		for _, hijo in ipairs(reposo:GetChildren()) do
+			hijo.Visible = hijo.Name == "Boca_" .. tostring(boca)
+		end
+	end
+	return expresion.Parpado
+end
+
+-- Montura de gafas dibujada sobre la cara (no tapa los ojos ni el parpadeo).
+function Atuendos.GafasCara(cara, color)
+	color = color or OSCURO
+	local grupo = capa(cara, "Gafas", true)
+	grupo.ZIndex = 10
+	for _, x in ipairs({ 0.33, 0.67 }) do
+		local lente = forma(grupo, x, 0.45, 0.27, 0.26, Color3.fromRGB(200, 225, 240), false, 0, 0.88, 20)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0.3, 0)
+		c.Parent = lente
+		local borde = Instance.new("UIStroke")
+		borde.Color = color
+		borde.Thickness = 3.5
+		borde.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		borde.Parent = lente
+	end
+	forma(grupo, 0.5, 0.42, 0.08, 0.03, color, false, 0, 0, 20)
+	return grupo
 end
 
 --==============================================================================
@@ -2410,7 +3775,7 @@ PIEZAS.GorraAtras = function(m, color, detalle)
 	PIEZAS.Gorra(m, color, detalle, true)
 end
 
-PIEZAS.Gafas = function(m, color)
+PIEZAS.GafasSol = function(m, color)
 	local h = m.Head
 	local s = h.Size
 	for _, lado in ipairs({ -1, 1 }) do
@@ -2424,6 +3789,97 @@ PIEZAS.Barba = function(m, color)
 	local s = h.Size
 	pegar(m, h, "Barba", Vector3.new(s.X * 0.86, s.Y * 0.26, s.Z * 0.2), C(0, -s.Y * 0.38, -s.Z * 0.42), color)
 	pegar(m, h, "Patilla", Vector3.new(s.X * 1.02, s.Y * 0.35, s.Z * 0.3), C(0, -s.Y * 0.2, -s.Z * 0.15), color)
+end
+
+PIEZAS.PeloRaya = function(m, color)
+	PIEZAS.PeloCorto(m, color)
+	local h = m.Head
+	local s = h.Size
+	-- Volumen peinado hacia un lado, flequillo lateral y patillas (estilo años 70)
+	pegar(m, h, "Tupe", Vector3.new(s.X * 0.8, s.Y * 0.18, s.Z * 0.92), C(s.X * 0.1, s.Y * 0.55, -s.Z * 0.03) * CFrame.Angles(0, 0, math.rad(-6)), color)
+	pegar(m, h, "FlequilloLateral", Vector3.new(s.X * 0.62, s.Y * 0.14, s.Z * 0.16), C(s.X * 0.17, s.Y * 0.39, -s.Z * 0.5) * CFrame.Angles(0, 0, math.rad(-12)), color)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, h, "Patilla", Vector3.new(s.X * 0.08, s.Y * 0.36, s.Z * 0.3), C(lado * s.X * 0.52, s.Y * 0.04, -s.Z * 0.05), color)
+	end
+end
+
+PIEZAS.PeloEntradas = function(m, color)
+	local h = m.Head
+	local s = h.Size
+	-- Coronilla y nuca con pelo; la frente queda despejada
+	pegar(m, h, "Pelo", Vector3.new(s.X * 1.04, s.Y * 0.16, s.Z * 0.62), C(0, s.Y * 0.45, s.Z * 0.22), color)
+	pegar(m, h, "Pelo", Vector3.new(s.X * 1.04, s.Y * 0.6, s.Z * 0.18), C(0, s.Y * 0.15, s.Z * 0.46), color)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, h, "Sien", Vector3.new(s.X * 0.1, s.Y * 0.42, s.Z * 0.62), C(lado * s.X * 0.52, s.Y * 0.14, s.Z * 0.16), color)
+		pegar(m, h, "Patilla", Vector3.new(s.X * 0.08, s.Y * 0.3, s.Z * 0.22), C(lado * s.X * 0.52, -s.Y * 0.05, -s.Z * 0.12), color)
+	end
+end
+
+PIEZAS.Bigote = function(m, color)
+	local h = m.Head
+	local s = h.Size
+	pegar(m, h, "Bigote", Vector3.new(s.X * 0.42, s.Y * 0.09, s.Z * 0.12), C(0, -s.Y * 0.1, -s.Z * 0.49), color)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, h, "BigotePunta", Vector3.new(s.X * 0.1, s.Y * 0.11, s.Z * 0.1), C(lado * s.X * 0.22, -s.Y * 0.15, -s.Z * 0.48), color)
+	end
+end
+
+PIEZAS.Corbata = function(m, color)
+	local t = m.UpperTorso
+	local s = t.Size
+	pegar(m, t, "CorbataNudo", Vector3.new(s.X * 0.12, s.Y * 0.11, 0.08), C(0, s.Y * 0.4, -s.Z * 0.55), color)
+	pegar(m, t, "CorbataPala", Vector3.new(s.X * 0.13, s.Y * 0.62, 0.05), C(0, s.Y * 0.02, -s.Z * 0.54), color)
+end
+
+-- Bata de laboratorio: solapas, faldón hasta las rodillas y bolsillo con bolígrafos
+PIEZAS.Solapas = function(m, color)
+	local t = m.UpperTorso
+	local s = t.Size
+	local tono = color:Lerp(Color3.new(0, 0, 0), 0.1)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, t, "Solapa", Vector3.new(s.X * 0.16, s.Y * 0.5, 0.07), C(lado * s.X * 0.2, s.Y * 0.2, -s.Z * 0.53) * CFrame.Angles(0, 0, math.rad(lado * 18)), tono)
+	end
+end
+
+PIEZAS.Faldon = function(m, color)
+	local t = m.LowerTorso
+	local s = t.Size
+	local pierna = m:FindFirstChild("RightUpperLeg")
+	local largo = (pierna and pierna.Size.Y or 1.2) * 1.05
+	pegar(m, t, "Faldon", Vector3.new(s.X * 1.1, largo, s.Z * 1.15), C(0, -s.Y * 0.3 - largo / 2, 0), color)
+	pegar(m, t, "FaldonAbertura", Vector3.new(0.06, largo, 0.04), C(0, -s.Y * 0.3 - largo / 2, -s.Z * 0.59), color:Lerp(Color3.new(0, 0, 0), 0.25))
+end
+
+PIEZAS.BolsilloBata = function(m, color)
+	local t = m.UpperTorso
+	local s = t.Size
+	local tono = color:Lerp(Color3.new(0, 0, 0), 0.08)
+	pegar(m, t, "Bolsillo", Vector3.new(s.X * 0.22, s.Y * 0.2, 0.05), C(-s.X * 0.28, -s.Y * 0.02, -s.Z * 0.53), tono)
+	pegar(m, t, "Boligrafo", Vector3.new(0.06, s.Y * 0.2, 0.06), C(-s.X * 0.32, s.Y * 0.12, -s.Z * 0.54), Color3.fromRGB(40, 70, 170))
+	pegar(m, t, "Boligrafo", Vector3.new(0.06, s.Y * 0.18, 0.06), C(-s.X * 0.25, s.Y * 0.11, -s.Z * 0.54), Color3.fromRGB(190, 40, 40))
+end
+
+PIEZAS.Botones = function(m)
+	local t = m.UpperTorso
+	local s = t.Size
+	for i, y in ipairs({ 0.25, 0.0, -0.25 }) do
+		pegar(m, t, "Boton" .. i, Vector3.new(0.08, 0.08, 0.04), C(0, s.Y * y, -s.Z * 0.52), Color3.fromRGB(235, 235, 230))
+	end
+end
+
+-- Cuello de camisa con el color de detalle (debajo de un chaleco)
+PIEZAS.CuelloCamisa = function(m, _, detalle)
+	local t = m.UpperTorso
+	local s = t.Size
+	pegar(m, t, "Cuello", Vector3.new(s.X * 0.55, s.Y * 0.08, s.Z * 1.04), C(0, s.Y * 0.47, 0), detalle or BLANCO)
+end
+
+-- Escote en pico del chaleco (deja ver la camisa)
+PIEZAS.PicoChaleco = function(m, _, detalle)
+	local t = m.UpperTorso
+	local s = t.Size
+	local lado = s.X * 0.26
+	pegar(m, t, "Pico", Vector3.new(lado, lado, 0.04), C(0, s.Y * 0.45, -s.Z * 0.51) * CFrame.Angles(0, 0, math.rad(45)), detalle or BLANCO)
 end
 
 PIEZAS.Capucha = function(m, color)
@@ -2484,6 +3940,9 @@ Atuendos.Superiores = {
 	Tirantes = { Brazos = "Ninguno" },
 	Chaqueta = { Brazos = "Completo", Extras = { "Abertura" } }, -- ColorDetalle = camiseta de debajo
 	CamisetaRayas = { Brazos = "Superior", Extras = { "Rayas" } }, -- ColorDetalle = color de las rayas
+	Camisa = { Brazos = "Completo", Extras = { "Cuello", "Botones" } },
+	Bata = { Brazos = "Completo", Extras = { "Abertura", "Solapas", "Faldon", "BolsilloBata" } }, -- ColorDetalle = camisa
+	ChalecoCamisa = { Brazos = "Completo", BrazosDetalle = true, Extras = { "CuelloCamisa", "PicoChaleco" } }, -- ColorDetalle = camisa
 }
 
 -- Piernas: "Superior" (pantalón corto) o "Completo"
@@ -2544,11 +4003,12 @@ function Atuendos.Vestir(modelo, def)
 	local prendaSup = Atuendos.Superiores[sup.Prenda or "Camiseta"] or Atuendos.Superiores.Camiseta
 	local colorSup = sup.Color or Color3.fromRGB(13, 105, 172)
 	colorear(modelo, { "UpperTorso" }, colorSup)
+	local colorBrazos = (prendaSup.BrazosDetalle and sup.ColorDetalle) or colorSup
 	if prendaSup.Brazos ~= "Ninguno" then
-		colorear(modelo, { "LeftUpperArm", "RightUpperArm" }, colorSup)
+		colorear(modelo, { "LeftUpperArm", "RightUpperArm" }, colorBrazos)
 	end
 	if prendaSup.Brazos == "Completo" then
-		colorear(modelo, { "LeftLowerArm", "RightLowerArm" }, colorSup)
+		colorear(modelo, { "LeftLowerArm", "RightLowerArm" }, colorBrazos)
 	end
 
 	-- Parte de abajo
@@ -2573,18 +4033,27 @@ function Atuendos.Vestir(modelo, def)
 		pieza(modelo, "Pelo" .. def.Pelo.Estilo, def.Pelo.Color or OSCURO)
 	end
 
-	-- Accesorios
+	-- Cara
+	local cara = nil
+	if def.Cara and type(def.Cara) ~= "number" and modelo:FindFirstChild("Head") then
+		cara = Atuendos.CrearCara(modelo.Head, def.Cara)
+	end
+
+	-- Accesorios (las gafas normales se dibujan sobre la cara)
 	for _, acc in ipairs(def.Accesorios or {}) do
 		local color = acc.Color
 		if acc.Tipo == "Barriga" then
 			color = color or colorSup
 		end
-		pieza(modelo, acc.Tipo, color or OSCURO, acc.ColorDetalle)
-	end
-
-	-- Cara
-	if def.Cara and type(def.Cara) ~= "number" and modelo:FindFirstChild("Head") then
-		Atuendos.CrearCara(modelo.Head, def.Cara)
+		if acc.Tipo == "Gafas" then
+			if cara then
+				Atuendos.GafasCara(cara, color)
+			else
+				pieza(modelo, "GafasSol", color or OSCURO)
+			end
+		else
+			pieza(modelo, acc.Tipo, color or OSCURO, acc.ColorDetalle)
+		end
 	end
 end
 
@@ -2755,10 +4224,13 @@ return Fabrica
 	  Entrada_Izq, Entrada_Der    → puntos de entrada/salida de escena
 	  Obj_1, Obj_2                → posiciones de objetos
 	  Cam_General, Cam_Izquierda, Cam_Derecha, Cam_Alta → puntos de cámara fijos
+	  Pared_*, Nota_* → superficies verticales donde pegar cosas (atributo Pared)
+	  Silla_*         → asientos (acción Sentar)       Suelo_* → puntos del suelo
 	  Audiencia                   → desde dónde "mira el público" (orienta los planos automáticos)
 
 	Atributos del Model (iluminación que se aplica al cargarlo):
-	  Hora (ClockTime), Brillo (Brightness), Ambiente (Color3), AmbienteExterior (Color3)
+	  Hora (ClockTime), Brillo (Brightness), Ambiente (Color3), AmbienteExterior (Color3),
+	  Tinte (Color3) y Saturacion (número) → tono de color de toda la imagen
 ]]
 
 local Constructor = {}
@@ -2773,6 +4245,10 @@ local COLOR_MARCA = {
 	Obj = rgb(255, 130, 40),
 	Cam = rgb(30, 30, 30),
 	Audiencia = rgb(160, 80, 220),
+	Pared = rgb(40, 170, 230),
+	Nota = rgb(255, 220, 60),
+	Silla = rgb(60, 200, 90),
+	Suelo = rgb(255, 130, 40),
 }
 
 local function parte(padre, nombre, tam, cf, color, op)
@@ -2847,12 +4323,19 @@ local function marca(carpeta, nombre, pos, mirar)
 		p = parte(carpeta, nombre, Vector3.new(0.8, 0.8, 1.6), CFrame.lookAt(pos, mirar), color, { Sombra = false })
 	elseif tipo == "Audiencia" then
 		p = parte(carpeta, nombre, Vector3.new(1, 1, 1), CFrame.new(pos), color, { Forma = Enum.PartType.Ball, Sombra = false })
+	elseif tipo == "Pared" or tipo == "Nota" then
+		-- Superficie vertical: "pos" está sobre la pared y "mirar" es la normal (hacia fuera)
+		local n = (mirar or Vector3.new(0, 0, 1)).Unit
+		local centro = pos + n * 0.05
+		p = parte(carpeta, nombre, Vector3.new(0.7, 0.7, 0.1), CFrame.lookAt(centro, centro + n), color, { Sombra = false })
+		p:SetAttribute("Pared", true)
 	else
-		local tam = (tipo == "Obj") and Vector3.new(1, 0.2, 1) or Vector3.new(2, 0.4, 2)
+		local pequena = tipo == "Obj" or tipo == "Suelo" or tipo == "Silla"
+		local tam = pequena and Vector3.new(1, 0.2, 1) or Vector3.new(2, 0.4, 2)
 		local centro = pos + Vector3.new(0, tam.Y / 2, 0)
 		local dir = mirar or Vector3.new(0, 0, 1)
 		p = parte(carpeta, nombre, tam, CFrame.lookAt(centro, centro + dir), color, { Sombra = false })
-		if tipo ~= "Obj" then
+		if tipo ~= "Obj" and tipo ~= "Suelo" then
 			-- Indica la cara frontal (hacia donde mirará el personaje)
 			local sg = Instance.new("SurfaceGui")
 			sg.Name = "Frente"
@@ -3115,7 +4598,334 @@ function Constructor.Neutro(carpeta)
 	marca(M, "Audiencia", Vector3.new(0, 4, 18))
 end
 
-Constructor.Lista = { "Calle", "Habitacion", "Exterior", "Neutro" }
+-- Texto pintado en una cara de una pieza (carteles, pizarras...). Sin texturas.
+local function rotulo(p, texto, fuente, color, cara, op)
+	op = op or {}
+	local sg = Instance.new("SurfaceGui")
+	sg.Name = "Rotulo"
+	sg.Face = cara or Enum.NormalId.Back
+	sg.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	sg.PixelsPerStud = op.Densidad or 60
+	sg.LightInfluence = 1
+	local t = Instance.new("TextLabel")
+	t.BackgroundTransparency = 1
+	t.Size = UDim2.fromScale(op.Ancho or 0.9, op.Alto or 0.84)
+	t.Position = UDim2.fromScale((1 - (op.Ancho or 0.9)) / 2, (1 - (op.Alto or 0.84)) / 2)
+	t.Font = fuente
+	t.TextScaled = true
+	t.TextWrapped = true
+	t.TextColor3 = color
+	t.Text = texto
+	t.Parent = sg
+	sg.Parent = p
+	return sg
+end
+
+-- Silla sencilla mirando hacia "dir" (+Z por defecto). Devuelve el punto central del asiento.
+local function silla(g, base, color, alto, haciaAtras)
+	alto = alto or 1.5
+	local z = haciaAtras and -1 or 1
+	caja(g, "SillaBase", Vector3.new(1.2, alto - 0.2, 1.2), base.X, base.Y, base.Z, color:Lerp(Color3.new(0, 0, 0), 0.25))
+	caja(g, "SillaAsiento", Vector3.new(1.6, 0.2, 1.6), base.X, base.Y + alto - 0.2, base.Z, color)
+	caja(g, "SillaRespaldo", Vector3.new(1.6, 2.2, 0.2), base.X, base.Y + alto, base.Z - 0.75 * z, color)
+	return Vector3.new(base.X, base.Y + alto, base.Z)
+end
+
+-- Mesa con cuatro patas. Devuelve la altura del tablero.
+local function mesa(g, centro, tam, alto, colorTablero, colorPatas)
+	caja(g, "MesaTablero", Vector3.new(tam.X, 0.3, tam.Y), centro.X, alto - 0.3, centro.Z, colorTablero)
+	for _, sx in ipairs({ -1, 1 }) do
+		for _, sz in ipairs({ -1, 1 }) do
+			caja(
+				g,
+				"MesaPata",
+				Vector3.new(0.25, alto - 0.3, 0.25),
+				centro.X + sx * (tam.X / 2 - 0.3),
+				0,
+				centro.Z + sz * (tam.Y / 2 - 0.3),
+				colorPatas or colorTablero
+			)
+		end
+	end
+	return alto
+end
+
+local function cilindroFrontal(padre, nombre, grosor, diametro, centro, color, op)
+	op = op or {}
+	op.Forma = Enum.PartType.Cylinder
+	return parte(padre, nombre, Vector3.new(grosor, diametro, diametro), CFrame.new(centro) * CFrame.Angles(0, math.pi / 2, 0), color, op)
+end
+
+--[[
+	LABORATORIO · Laboratorio de adhesivos de los años 70
+	Mesa central de trabajo junto a la pared del fondo, tablón de corcho y pizarra
+	(superficies donde pegar papeles), banco de química con microscopio y matraces,
+	armario de vidrio, ventana, reloj y cartel.
+]]
+function Constructor.Laboratorio(carpeta)
+	local _, g, M = nuevoEntorno(carpeta, "Laboratorio", {
+		Hora = 13,
+		Brillo = 2,
+		Ambiente = rgb(120, 125, 128),
+		Tinte = rgb(238, 246, 255),
+	})
+	local pared = rgb(238, 240, 232)
+	local menta = rgb(150, 195, 175)
+	local madera = rgb(130, 90, 55)
+	local metal = rgb(150, 152, 158)
+	local negro = rgb(45, 48, 52)
+
+	-- Suelo de baldosas
+	bloque(g, "Suelo", Vector3.new(32, 1, 24), Vector3.new(0, -0.5, -3), rgb(208, 212, 204), { Sombra = false })
+	for x = -12, 12, 4 do
+		bloque(g, "Junta", Vector3.new(0.08, 0.02, 24), Vector3.new(x, 0.01, -3), rgb(182, 188, 180), { Sombra = false })
+	end
+	for z = -11, 5, 4 do
+		bloque(g, "Junta", Vector3.new(32, 0.02, 0.08), Vector3.new(0, 0.01, z), rgb(182, 188, 180), { Sombra = false })
+	end
+
+	-- Paredes con zócalo verde menta
+	bloque(g, "ParedFondo", Vector3.new(32, 16, 1), Vector3.new(0, 8, -15.5), pared)
+	bloque(g, "ParedIzquierda", Vector3.new(1, 16, 24), Vector3.new(-16.5, 8, -3), pared)
+	bloque(g, "ParedDerecha", Vector3.new(1, 16, 24), Vector3.new(16.5, 8, -3), pared)
+	bloque(g, "ZocaloFondo", Vector3.new(32, 4, 0.2), Vector3.new(0, 2, -14.9), menta, { Sombra = false })
+	bloque(g, "ZocaloIzq", Vector3.new(0.2, 4, 24), Vector3.new(-15.9, 2, -3), menta, { Sombra = false })
+	bloque(g, "ZocaloDer", Vector3.new(0.2, 4, 24), Vector3.new(15.9, 2, -3), menta, { Sombra = false })
+
+	-- Cartel
+	local cartel = bloque(g, "Cartel", Vector3.new(11, 1.3, 0.2), Vector3.new(0, 13.2, -14.85), rgb(40, 85, 70))
+	rotulo(cartel, "LABORATORIO DE ADHESIVOS", Enum.Font.GothamBold, rgb(245, 245, 235))
+
+	-- Tablón de corcho (a la derecha) con un par de hojas clavadas
+	bloque(g, "TablonMarco", Vector3.new(6.6, 4.8, 0.25), Vector3.new(2.2, 6, -14.85), madera)
+	bloque(g, "TablonCorcho", Vector3.new(6, 4.2, 0.3), Vector3.new(2.2, 6, -14.8), rgb(196, 156, 104), { Sombra = false })
+	local hoja1 = bloque(g, "HojaClavada", Vector3.new(1, 1.3, 0.04), Vector3.new(-0.15, 4.75, -14.63), rgb(248, 248, 244), { Sombra = false })
+	rotulo(hoja1, "PRUEBA 12\n✗", Enum.Font.PatrickHand, rgb(60, 60, 70))
+	bloque(g, "Chincheta", Vector3.new(0.12, 0.12, 0.12), Vector3.new(-0.15, 5.3, -14.6), rgb(200, 40, 40), { Forma = Enum.PartType.Ball })
+	local hoja2 = bloque(g, "HojaClavada", Vector3.new(1.2, 0.9, 0.04), Vector3.new(4.6, 7.45, -14.63), rgb(248, 248, 244), { Sombra = false })
+	rotulo(hoja2, "PRUEBA 13\n✗", Enum.Font.PatrickHand, rgb(60, 60, 70))
+	bloque(g, "Chincheta", Vector3.new(0.12, 0.12, 0.12), Vector3.new(4.6, 7.8, -14.6), rgb(40, 90, 200), { Forma = Enum.PartType.Ball })
+
+	-- Pizarra (a la izquierda) con fórmulas
+	bloque(g, "PizarraMarco", Vector3.new(7.4, 4.6, 0.25), Vector3.new(-6, 6, -14.85), rgb(110, 80, 50))
+	local pizarra = bloque(g, "Pizarra", Vector3.new(7, 4.2, 0.3), Vector3.new(-6, 6, -14.8), rgb(40, 70, 55), { Sombra = false })
+	rotulo(pizarra, "Polímero A-174\nadhesión: BAJA\n¿utilidad?  ???", Enum.Font.PatrickHand, rgb(235, 240, 230), Enum.NormalId.Back, { Ancho = 0.62, Alto = 0.8 })
+	bloque(g, "Repisa", Vector3.new(7, 0.15, 0.45), Vector3.new(-6, 3.85, -14.55), rgb(110, 80, 50))
+	bloque(g, "Tiza", Vector3.new(0.4, 0.1, 0.1), Vector3.new(-8.5, 3.98, -14.5), rgb(250, 250, 250), { Sombra = false })
+
+	-- Reloj de pared
+	cilindroFrontal(g, "RelojAro", 0.15, 2.2, Vector3.new(-12, 11, -14.9), rgb(30, 30, 30))
+	cilindroFrontal(g, "RelojEsfera", 0.2, 2, Vector3.new(-12, 11, -14.85), rgb(250, 250, 245))
+	parte(g, "Aguja", Vector3.new(0.1, 0.75, 0.05), CFrame.new(-12, 11.3, -14.73), rgb(20, 20, 20), { Sombra = false })
+	parte(g, "Aguja", Vector3.new(0.1, 0.55, 0.05), CFrame.new(-11.8, 11, -14.73) * CFrame.Angles(0, 0, math.rad(-70)), rgb(20, 20, 20), { Sombra = false })
+
+	-- Mesa central de trabajo (encimera negra)
+	caja(g, "MesaTablero", Vector3.new(6, 0.3, 3), -1, 2.85, -10, negro)
+	for _, sx in ipairs({ -1, 1 }) do
+		for _, sz in ipairs({ -1, 1 }) do
+			caja(g, "MesaPata", Vector3.new(0.25, 2.85, 0.25), -1 + sx * 2.7, 0, -10 + sz * 1.2, metal)
+		end
+	end
+	caja(g, "MesaBalda", Vector3.new(5.6, 0.15, 2.6), -1, 0.8, -10, metal)
+	caja(g, "Folios", Vector3.new(1, 0.25, 1.3), -0.6, 3.15, -10.6, rgb(250, 250, 248), { Sombra = false })
+	cilindroVertical(g, "VasoPrecipitado", 0.6, 0.45, Vector3.new(1.3, 3.15, -10.9), rgb(190, 225, 240), { Sombra = false }).Transparency = 0.35
+	cilindroVertical(g, "Liquido", 0.3, 0.4, Vector3.new(1.3, 3.16, -10.9), rgb(120, 200, 120), { Sombra = false })
+	cilindroVertical(g, "TuboEnsayo", 0.7, 0.18, Vector3.new(1.75, 3.15, -10.6), rgb(240, 170, 60), { Sombra = false })
+
+	-- Banco de química a la derecha
+	caja(g, "BancoMueble", Vector3.new(2.6, 2.85, 11), 14.4, 0, -8, rgb(120, 165, 150))
+	caja(g, "BancoEncimera", Vector3.new(2.9, 0.3, 11.2), 14.3, 2.85, -8, negro)
+	for i, z in ipairs({ -11, -9.5, -8, -6.5 }) do
+		caja(g, "Cajon" .. i, Vector3.new(0.05, 1, 1.2), 13.08, 1.5, z, rgb(100, 140, 128), { Sombra = false })
+	end
+	-- Microscopio
+	caja(g, "MicroBase", Vector3.new(0.8, 0.15, 1), 14.3, 3.15, -11.5, rgb(235, 235, 230))
+	caja(g, "MicroBrazo", Vector3.new(0.25, 1.2, 0.25), 14.3, 3.3, -11.85, rgb(235, 235, 230))
+	parte(g, "MicroTubo", Vector3.new(0.9, 0.25, 0.25), CFrame.new(14.3, 4.5, -11.55) * CFrame.Angles(0, 0, math.rad(70)), rgb(40, 40, 45))
+	-- Matraces de colores
+	for i, d in ipairs({ { -9, rgb(240, 140, 60) }, { -8, rgb(80, 150, 230) }, { -7, rgb(130, 210, 110) } }) do
+		cilindroVertical(g, "Matraz" .. i, 0.5, 0.7, Vector3.new(14.3, 3.15, d[1]), d[2], { Sombra = false })
+		cilindroVertical(g, "Cuello" .. i, 0.5, 0.22, Vector3.new(14.3, 3.65, d[1]), rgb(210, 235, 245), { Sombra = false })
+	end
+	-- Balda con frascos
+	caja(g, "Balda", Vector3.new(1.3, 0.2, 10), 15.3, 7, -8, madera)
+	for i, z in ipairs({ -12, -10.5, -9, -7.5, -6, -4.5 }) do
+		local c = (i % 2 == 0) and rgb(120, 70, 30) or rgb(60, 110, 70)
+		cilindroVertical(g, "Frasco" .. i, 0.9, 0.5, Vector3.new(15.3, 7.2, z), c, { Sombra = false })
+	end
+	-- Taburetes
+	for _, z in ipairs({ -6, -3.5 }) do
+		cilindroVertical(g, "TaburetePie", 1.9, 0.25, Vector3.new(12, 0, z), metal)
+		cilindroVertical(g, "TabureteAsiento", 0.25, 1.2, Vector3.new(12, 1.9, z), rgb(60, 60, 65))
+	end
+
+	-- Armario de vidrio (izquierda) y ventana
+	caja(g, "Armario", Vector3.new(2, 8, 6), -15, 0, -9, rgb(180, 186, 182))
+	for _, z in ipairs({ -10.4, -7.6 }) do
+		bloque(g, "ArmarioCristal", Vector3.new(0.1, 3.4, 2.5), Vector3.new(-13.97, 5.6, z), rgb(190, 220, 235), { Sombra = false })
+	end
+	bloque(g, "VentanaMarco", Vector3.new(0.3, 4.6, 6.2), Vector3.new(-15.9, 8.6, -1.5), rgb(245, 245, 245))
+	bloque(g, "VentanaCristal", Vector3.new(0.3, 4, 5.6), Vector3.new(-15.8, 8.6, -1.5), rgb(170, 210, 240), { Sombra = false })
+
+	-- Papelera con intentos fallidos
+	cilindroVertical(g, "Papelera", 1.5, 1.2, Vector3.new(-5.2, 0, -13), rgb(120, 125, 130))
+	for i, d in ipairs({ { -5.4, -12.9 }, { -5, -13.2 }, { -5.1, -12.7 } }) do
+		parte(g, "PapelArrugado" .. i, Vector3.new(0.5, 0.5, 0.5), CFrame.new(d[1], 1.55 + i * 0.05, d[2]), rgb(245, 245, 240), {
+			Forma = Enum.PartType.Ball,
+			Sombra = false,
+		})
+	end
+
+	-- Marcas
+	local frente = Vector3.new(0, 0, 1)
+	marca(M, "Pos_A", Vector3.new(-3.2, 0, -12.7), frente)
+	marca(M, "Pos_TrasMesa", Vector3.new(1, 0, -12.7), frente)
+	marca(M, "Pos_B", Vector3.new(2.6, 0, -6.5), Vector3.new(-0.5, 0, 1))
+	marca(M, "Pos_C", Vector3.new(-0.5, 0, -4.5), frente)
+	marca(M, "Pos_D", Vector3.new(6.5, 0, -6), Vector3.new(-1, 0, 0.3))
+	marca(M, "Entrada_Izq", Vector3.new(-13, 0, -4), Vector3.new(1, 0, 0))
+	marca(M, "Entrada_Der", Vector3.new(12.5, 0, -1), Vector3.new(-1, 0, 0))
+	marca(M, "Obj_1", Vector3.new(-2.8, 3.15, -10.2), frente)
+	marca(M, "Obj_2", Vector3.new(0.6, 3.15, -9.5), frente)
+	marca(M, "Obj_3", Vector3.new(14.1, 3.15, -4.6), Vector3.new(-1, 0, 0))
+	marca(M, "Obj_4", Vector3.new(14.1, 3.15, -2.9), Vector3.new(-1, 0, 0))
+	marca(M, "Suelo_1", Vector3.new(10.5, 0, -2), Vector3.new(-1, 0, 0.5))
+	-- Superficies de pared (cara frontal = hacia fuera de la pared)
+	local corcho, encerado = -14.65, -14.65
+	marca(M, "Pared_1", Vector3.new(1.6, 5, corcho), frente)
+	marca(M, "Pared_2", Vector3.new(-3.7, 5, encerado), frente)
+	for i, d in ipairs({ { 0.3, 7.2 }, { 1.8, 7.4 }, { 3.2, 7 }, { 3, 5.2 }, { 4.5, 5.5 }, { 1.5, 4.5 } }) do
+		marca(M, "Nota_" .. i, Vector3.new(d[1], d[2], corcho), frente)
+	end
+	camarasEstandar(M, Vector3.new(0, 3.5, -9), 24)
+	marca(M, "Cam_Tablon", Vector3.new(2.2, 6, -6.5), Vector3.new(2.2, 6, -14.7))
+	marca(M, "Cam_Mesa", Vector3.new(-0.5, 5.2, -3), Vector3.new(-0.5, 3.4, -10.5))
+	marca(M, "Audiencia", Vector3.new(0, 4, 14))
+end
+
+--[[
+	SALAENSAYO · Sala de ensayo del coro (años 70)
+	Gradas con sillas, atriles, piano vertical, vidrieras de colores, tablero de
+	himnos y, en primer plano, la mesa y la silla donde Art lee su cancionero.
+]]
+function Constructor.SalaEnsayo(carpeta)
+	local _, g, M = nuevoEntorno(carpeta, "SalaEnsayo", {
+		Hora = 17.4,
+		Brillo = 1.7,
+		Ambiente = rgb(135, 112, 92),
+		Tinte = rgb(255, 236, 210),
+		Saturacion = 0.05,
+	})
+	local pared = rgb(232, 214, 184)
+	local madera = rgb(125, 85, 52)
+	local maderaClara = rgb(150, 102, 62)
+	local tapizado = rgb(140, 45, 50)
+
+	-- Suelo de tarima
+	bloque(g, "Suelo", Vector3.new(32, 1, 26), Vector3.new(0, -0.5, -3), maderaClara, { Sombra = false })
+	for x = -12, 12, 4.8 do
+		bloque(g, "Tabla", Vector3.new(0.06, 0.02, 26), Vector3.new(x, 0.01, -3), rgb(125, 82, 48), { Sombra = false })
+	end
+
+	-- Paredes con friso de madera
+	bloque(g, "ParedFondo", Vector3.new(32, 16, 1), Vector3.new(0, 8, -16.5), pared)
+	bloque(g, "ParedIzquierda", Vector3.new(1, 16, 26), Vector3.new(-16.5, 8, -3), pared)
+	bloque(g, "ParedDerecha", Vector3.new(1, 16, 26), Vector3.new(16.5, 8, -3), pared)
+	bloque(g, "FrisoFondo", Vector3.new(32, 3.5, 0.2), Vector3.new(0, 1.75, -15.9), madera, { Sombra = false })
+	bloque(g, "MolduraFondo", Vector3.new(32, 0.2, 0.35), Vector3.new(0, 3.6, -15.85), madera, { Sombra = false })
+	bloque(g, "FrisoIzq", Vector3.new(0.2, 3.5, 26), Vector3.new(-15.9, 1.75, -3), madera, { Sombra = false })
+	bloque(g, "FrisoDer", Vector3.new(0.2, 3.5, 26), Vector3.new(15.9, 1.75, -3), madera, { Sombra = false })
+
+	-- Vidrieras de colores
+	local colores = {
+		rgb(190, 60, 60),
+		rgb(60, 90, 170),
+		rgb(220, 180, 60),
+		rgb(60, 140, 90),
+		rgb(150, 70, 150),
+		rgb(230, 140, 60),
+	}
+	for _, x in ipairs({ -9, 9 }) do
+		bloque(g, "VidrieraMarco", Vector3.new(4.2, 6.4, 0.3), Vector3.new(x, 9.2, -15.85), rgb(60, 45, 40))
+		local i = 0
+		for fila = 0, 2 do
+			for col = 0, 1 do
+				i = i + 1
+				bloque(g, "Vidrio", Vector3.new(1.8, 1.9, 0.3), Vector3.new(x - 0.95 + col * 1.9, 7.2 + fila * 2, -15.8), colores[i], {
+					Material = Enum.Material.Neon,
+					Sombra = false,
+				}).Transparency = 0.25
+			end
+		end
+	end
+
+	-- Tablero de himnos y cartel
+	local tablero = bloque(g, "TableroHimnos", Vector3.new(3, 4, 0.25), Vector3.new(0, 9.4, -15.85), rgb(70, 45, 30))
+	rotulo(tablero, "CORO\n\n12\n47\n103", Enum.Font.Antique, rgb(245, 235, 210))
+	local cartel = bloque(g, "Cartel", Vector3.new(12, 1.3, 0.2), Vector3.new(0, 13.6, -15.85), rgb(245, 238, 220))
+	rotulo(cartel, "ENSAYO DEL CORO · JUEVES 19:00", Enum.Font.Antique, rgb(110, 40, 40))
+
+	-- Gradas con sillas
+	caja(g, "GradaAlta", Vector3.new(22, 1.2, 2.8), 0, 0, -14.3, madera)
+	caja(g, "GradaBaja", Vector3.new(22, 0.6, 2.8), 0, 0, -11.5, madera)
+	for _, x in ipairs({ -6, 0, 6 }) do
+		silla(g, Vector3.new(x, 1.2, -14.3), tapizado, 1.5)
+		silla(g, Vector3.new(x + 3, 0.6, -11.5), tapizado, 1.5)
+	end
+	-- Atriles
+	for _, x in ipairs({ -5, 1, 7 }) do
+		cilindroVertical(g, "AtrilPie", 3, 0.15, Vector3.new(x, 0, -9), rgb(35, 35, 38))
+		parte(g, "AtrilBandeja", Vector3.new(1.4, 1, 0.08), CFrame.new(x, 3.3, -8.95) * CFrame.Angles(math.rad(-25), 0, 0), rgb(35, 35, 38))
+	end
+
+	-- Piano vertical (izquierda)
+	caja(g, "PianoCuerpo", Vector3.new(2.2, 4.6, 6), -12.6, 0, -6, rgb(60, 34, 22))
+	caja(g, "PianoTapa", Vector3.new(2.5, 0.2, 6.3), -12.6, 4.6, -6, rgb(45, 25, 16))
+	caja(g, "PianoTeclas", Vector3.new(1.1, 0.25, 5.4), -11.05, 2.5, -6, rgb(242, 240, 232))
+	caja(g, "PianoTeclasNegras", Vector3.new(0.45, 0.12, 5.2), -11.35, 2.75, -6, rgb(20, 20, 20), { Sombra = false })
+	parte(g, "Partitura", Vector3.new(0.05, 1, 1.4), CFrame.new(-11.45, 3.5, -6) * CFrame.Angles(0, 0, math.rad(-12)), rgb(248, 246, 238), { Sombra = false })
+	caja(g, "PianoBanqueta", Vector3.new(1.4, 1.6, 3), -9.4, 0, -6, rgb(60, 34, 22))
+
+	-- Planta
+	cilindroVertical(g, "Maceta", 1.2, 1.2, Vector3.new(13.5, 0, -13), rgb(170, 90, 60))
+	parte(g, "Planta", Vector3.new(2.4, 2.4, 2.4), CFrame.new(13.5, 2.4, -13), rgb(70, 130, 60), { Forma = Enum.PartType.Ball })
+
+	-- Mesa y silla de Art (primer término, mirando a cámara)
+	local alto = mesa(g, Vector3.new(2.5, 0, -2.5), Vector2.new(4.4, 2.6), 2.75, rgb(140, 95, 55))
+	local asiento = silla(g, Vector3.new(2.5, 0, -5), rgb(120, 80, 48), 1.5)
+	-- Pila de cancioneros y lámpara de mesa
+	for i, c in ipairs({ rgb(110, 30, 40), rgb(30, 60, 110), rgb(110, 30, 40) }) do
+		caja(g, "CancioneroPila" .. i, Vector3.new(0.9, 0.22, 1.2), 0.9, alto + (i - 1) * 0.22, -2.1, c, { Sombra = false })
+	end
+	cilindroVertical(g, "LamparaPie", 1.2, 0.12, Vector3.new(4.2, alto, -3.4), rgb(40, 40, 40))
+	parte(g, "LamparaPantalla", Vector3.new(0.7, 0.7, 0.7), CFrame.new(4.2, alto + 1.35, -3.2), rgb(40, 110, 70), {
+		Forma = Enum.PartType.Ball,
+	})
+	-- Papeles sueltos sobre la mesa
+	for i, d in ipairs({ { 3.6, -2.2, 12 }, { 3.9, -1.9, -20 } }) do
+		parte(g, "PapelSuelto" .. i, Vector3.new(0.85, 0.03, 1.1), CFrame.new(d[1], alto + 0.02 * i, d[2]) * CFrame.Angles(0, math.rad(d[3]), 0), rgb(248, 248, 242), {
+			Sombra = false,
+		})
+	end
+
+	local frente = Vector3.new(0, 0, 1)
+	marca(M, "Silla_1", asiento, frente)
+	marca(M, "Obj_Libro", Vector3.new(2.4, alto, -3), frente)
+	marca(M, "Obj_Papeles", Vector3.new(3.7, alto + 0.05, -2.9), frente)
+	marca(M, "Obj_Nota", Vector3.new(1.4, alto, -3.1), frente)
+	marca(M, "Suelo_Libro", Vector3.new(3.1, 0, -0.5), frente)
+	marca(M, "Pos_A", Vector3.new(-2, 0, -2), frente)
+	marca(M, "Pos_B", Vector3.new(6, 0, -2), frente)
+	marca(M, "Pos_C", Vector3.new(0, 0, -7), frente)
+	marca(M, "Pos_D", Vector3.new(-8, 0, -4), frente)
+	marca(M, "Entrada_Izq", Vector3.new(-13, 0, 0), Vector3.new(1, 0, 0))
+	marca(M, "Entrada_Der", Vector3.new(13, 0, 0), Vector3.new(-1, 0, 0))
+	camarasEstandar(M, Vector3.new(1, 3, -5), 22)
+	marca(M, "Cam_Mesa", Vector3.new(2.5, 3.9, 4.5), Vector3.new(2.5, 2.7, -3))
+	marca(M, "Audiencia", Vector3.new(1, 4, 16))
+end
+
+Constructor.Lista = { "Calle", "Habitacion", "Exterior", "Neutro", "Laboratorio", "SalaEnsayo" }
 
 function Constructor.ConstruirTodos(carpeta)
 	for _, nombre in ipairs(Constructor.Lista) do
@@ -3133,6 +4943,8 @@ return Constructor
 	Cada objeto es un Model pequeño (1-2 Parts, sin texturas) con:
 	  · PrimaryPart = la pieza principal (por ahí se agarra).
 	  · Atributo "OffsetAgarre" (CFrame) = cómo se coloca en la mano derecha.
+	  · Atributo "Plano" = true en hojas y notas: su cara grande es la frontal (-Z),
+	    se pegan planas en paredes y mesas y caen como un papel.
 
 	Puedes añadir tus propios objetos directamente en StoryTemplate > Objetos:
 	cualquier Model sirve (si no tiene PrimaryPart se usa su primera pieza).
@@ -3154,6 +4966,32 @@ local function nuevo(carpeta, nombre, offset)
 	m:SetAttribute("OffsetAgarre", offset or CFrame.new())
 	m.Parent = carpeta
 	return m
+end
+
+local function plano(m)
+	m:SetAttribute("Plano", true)
+	return m
+end
+
+-- Texto impreso o escrito en la cara frontal de una pieza
+local function escrito(p, texto, fuente, color, cara)
+	local sg = Instance.new("SurfaceGui")
+	sg.Name = "Escrito"
+	sg.Face = cara or Enum.NormalId.Front
+	sg.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+	sg.PixelsPerStud = 120
+	sg.LightInfluence = 1
+	local t = Instance.new("TextLabel")
+	t.BackgroundTransparency = 1
+	t.Size = UDim2.fromScale(0.86, 0.8)
+	t.Position = UDim2.fromScale(0.07, 0.1)
+	t.Font = fuente
+	t.TextScaled = true
+	t.TextWrapped = true
+	t.TextColor3 = color
+	t.Text = texto
+	t.Parent = sg
+	sg.Parent = p
 end
 
 local function pieza(m, nombre, tam, cf, color)
@@ -3198,6 +5036,77 @@ function Constructor.ConstruirTodos(carpeta)
 	m = nuevo(carpeta, "Bolsa", CFrame.new(0, -0.2, -0.5))
 	m.PrimaryPart = pieza(m, "Cuerpo", Vector3.new(1.2, 1.3, 0.6), CFrame.new(), rgb(205, 175, 125))
 	pieza(m, "Borde", Vector3.new(1.22, 0.15, 0.62), CFrame.new(0, 0.58, 0), rgb(150, 115, 70))
+
+	--==========================================================================
+	-- HISTORIA: EL ORIGEN DEL POST-IT
+	-- Hojas y notas: finas en Z, cara frontal = -Z (en la mano mira hacia delante).
+	--==========================================================================
+
+	-- Folio con unas líneas de texto
+	m = plano(nuevo(carpeta, "Papel", CFrame.new(0, 0.5, -0.1)))
+	m.PrimaryPart = pieza(m, "Hoja", Vector3.new(1, 1.3, 0.03), CFrame.new(), rgb(248, 248, 245))
+	for i, y in ipairs({ 0.4, 0.2, 0, -0.2 }) do
+		pieza(m, "Linea" .. i, Vector3.new(0.7 - i * 0.05, 0.04, 0.032), CFrame.new(-0.05, y, 0), rgb(150, 150, 160))
+	end
+
+	-- Hoja con el pegamento de Spencer (crema, con la franja adhesiva arriba)
+	m = plano(nuevo(carpeta, "PapelAdhesivo", CFrame.new(0, 0.35, -0.1)))
+	m.PrimaryPart = pieza(m, "Hoja", Vector3.new(0.75, 0.75, 0.03), CFrame.new(), rgb(250, 241, 205))
+	pieza(m, "Franja", Vector3.new(0.75, 0.13, 0.034), CFrame.new(0, 0.31, 0), rgb(232, 216, 160))
+
+	-- Nota adhesiva amarilla (Post-it)
+	m = plano(nuevo(carpeta, "NotaAmarilla", CFrame.new(0, 0.3, -0.1)))
+	m.PrimaryPart = pieza(m, "Hoja", Vector3.new(0.6, 0.6, 0.03), CFrame.new(), rgb(255, 225, 60))
+	pieza(m, "Franja", Vector3.new(0.6, 0.1, 0.034), CFrame.new(0, 0.25, 0), rgb(242, 205, 45))
+
+	-- Marcapáginas de papel
+	m = plano(nuevo(carpeta, "Marcapaginas", CFrame.new(0, 0.45, -0.1)))
+	m.PrimaryPart = pieza(m, "Tira", Vector3.new(0.3, 1.1, 0.03), CFrame.new(), rgb(246, 246, 240))
+	pieza(m, "Borla", Vector3.new(0.1, 0.25, 0.04), CFrame.new(0, -0.62, 0), rgb(180, 40, 45))
+
+	-- Bloc de notas amarillas
+	m = plano(nuevo(carpeta, "BlocNotas", CFrame.new(0, 0.4, -0.25)))
+	m.PrimaryPart = pieza(m, "Bloque", Vector3.new(0.9, 0.9, 0.3), CFrame.new(), rgb(250, 215, 50))
+	pieza(m, "HojaSuperior", Vector3.new(0.9, 0.9, 0.02), CFrame.new(0, 0, -0.155), rgb(255, 230, 80))
+	pieza(m, "Canto", Vector3.new(0.92, 0.08, 0.31), CFrame.new(0, 0.42, 0), rgb(235, 195, 40))
+
+	-- Cancionero cerrado (granate con franja dorada)
+	m = nuevo(carpeta, "Cancionero", CFrame.new(0, 0.1, -0.5) * CFrame.Angles(math.rad(-80), 0, 0))
+	m.PrimaryPart = pieza(m, "Tapa", Vector3.new(0.95, 0.28, 1.25), CFrame.new(), rgb(110, 30, 40))
+	pieza(m, "Paginas", Vector3.new(0.9, 0.24, 1.2), CFrame.new(0.04, 0, 0), rgb(245, 238, 220))
+	pieza(m, "Franja", Vector3.new(0.96, 0.29, 0.12), CFrame.new(0, 0, -0.42), rgb(210, 170, 70))
+
+	-- Cancionero abierto sobre la mesa
+	m = nuevo(carpeta, "CancioneroAbierto", CFrame.new(0, 0.1, -0.5) * CFrame.Angles(math.rad(-70), 0, 0))
+	m.PrimaryPart = pieza(m, "Tapas", Vector3.new(1.95, 0.05, 1.3), CFrame.new(), rgb(110, 30, 40))
+	pieza(m, "PaginasIzq", Vector3.new(0.92, 0.12, 1.2), CFrame.new(-0.48, 0.08, 0) * CFrame.Angles(0, 0, math.rad(4)), rgb(245, 238, 220))
+	pieza(m, "PaginasDer", Vector3.new(0.92, 0.12, 1.2), CFrame.new(0.48, 0.08, 0) * CFrame.Angles(0, 0, math.rad(-4)), rgb(245, 238, 220))
+	pieza(m, "Lomo", Vector3.new(0.05, 0.14, 1.2), CFrame.new(0, 0.07, 0), rgb(200, 190, 170))
+	for i, z in ipairs({ -0.35, -0.15, 0.05, 0.25 }) do
+		pieza(m, "Pentagrama" .. i, Vector3.new(0.7, 0.01, 0.03), CFrame.new(-0.5, 0.145, z), rgb(120, 110, 100))
+		pieza(m, "Pentagrama" .. i, Vector3.new(0.7, 0.01, 0.03), CFrame.new(0.5, 0.145, z), rgb(120, 110, 100))
+	end
+
+	-- Bote de pegamento con pincel
+	m = nuevo(carpeta, "Pegamento", CFrame.new(0, 0.2, -0.3))
+	m.PrimaryPart = pieza(m, "Bote", Vector3.new(0.6, 0.55, 0.55), CFrame.Angles(0, 0, math.pi / 2), rgb(175, 115, 45))
+	m.PrimaryPart.Shape = Enum.PartType.Cylinder
+	m.PrimaryPart.Size = Vector3.new(0.6, 0.55, 0.55)
+	m.PrimaryPart.Transparency = 0.15
+	local etiqueta = pieza(m, "Etiqueta", Vector3.new(0.25, 0.57, 0.57), CFrame.Angles(0, 0, math.pi / 2), rgb(245, 245, 240))
+	etiqueta.Shape = Enum.PartType.Cylinder
+	etiqueta.Size = Vector3.new(0.25, 0.57, 0.57)
+	local tapa = pieza(m, "Tapa", Vector3.new(0.12, 0.6, 0.6), CFrame.new(0, 0.36, 0) * CFrame.Angles(0, 0, math.pi / 2), rgb(30, 30, 30))
+	tapa.Shape = Enum.PartType.Cylinder
+	tapa.Size = Vector3.new(0.12, 0.6, 0.6)
+	pieza(m, "Pincel", Vector3.new(0.07, 0.6, 0.07), CFrame.new(0.08, 0.55, 0) * CFrame.Angles(0, 0, math.rad(-15)), rgb(150, 100, 55))
+
+	-- Caja de producto (notas adhesivas listas para las tiendas)
+	m = nuevo(carpeta, "CajaNotas", CFrame.new(0, 0.3, -0.5))
+	m.PrimaryPart = pieza(m, "Caja", Vector3.new(1.6, 1, 1.2), CFrame.new(), rgb(250, 205, 40))
+	local franja = pieza(m, "Franja", Vector3.new(1.62, 0.35, 1.22), CFrame.new(0, 0, 0), rgb(255, 245, 220))
+	escrito(franja, "NOTAS ADHESIVAS", Enum.Font.GothamBold, rgb(60, 50, 30), Enum.NormalId.Back)
+	escrito(franja, "NOTAS ADHESIVAS", Enum.Font.GothamBold, rgb(60, 50, 30), Enum.NormalId.Front)
 end
 
 return Constructor
@@ -3425,6 +5334,319 @@ return {
 		{ Accion = "Hablar", Actor = "Secundario1", Duracion = 3, SoloBoca = true, Paralelo = true },
 		{ Accion = "Hablar", Actor = "Secundario2", Duracion = 3, SoloBoca = true },
 		{ Accion = "Esperar", Tiempo = 3 },
+	},
+}
+]=======] },
+	{ Ruta = "StoryTemplate/Escenas", Nombre = "Historia_PostIt", Clase = "ModuleScript", Fuente = [=======[
+--[[
+	HISTORIA_POSTIT · «El pegamento que no pegaba» (Guion.md, 6 escenas)
+	Studio: ReplicatedStorage > StoryTemplate > Escenas > Historia_PostIt
+
+	Toda la escena es una LÍNEA DE TIEMPO: cada paso tiene  T = segundo  y se
+	ejecuta exactamente en ese momento (contado desde el primer paso).
+	Las voces (Audio/postit1..11.WAV) empiezan en los segundos de la tabla VOZ y
+	cada acción se ancla a una voz:  T = en("postit2", 1.5)  = 1.5 s después de
+	que empiece postit2. Así, si cambias un audio, basta con mover su entrada en VOZ.
+
+	Duración de cada audio y tramos con voz (medidos por Audio/analizar_audio.py):
+	  postit1  4.20 s  [0.18-1.96] [2.38-4.08]
+	  postit2  4.20 s  [0.52-1.82] [2.00-4.10]
+	  postit3  1.30 s  [0.36-1.20]
+	  postit4  4.04 s  [0.28-1.94] [2.26-3.94]
+	  postit5  1.07 s  [0.26-0.94]
+	  postit6  2.88 s  [0.32-2.80]
+	  postit7  2.11 s  [0.22-1.84]
+	  postit8  2.88 s  [0.16-1.00] [1.36-2.64]
+	  postit9  5.43 s  [0.22-2.08] [2.50-3.86] [4.02-5.24]
+	  postit10 8.75 s  [0.36-1.46] [1.72-3.62] [4.24-6.40] [7.36-8.58]
+	  postit11 1.65 s  [0.24-1.48]
+
+	Personajes: Spencer (químico, bata y gafas) y Art (ingeniero y narrador).
+	Escenarios: Laboratorio y SalaEnsayo.
+]]
+
+-- Segundo de la escena en el que empieza cada audio (tabla de sincronización)
+local VOZ = {
+	postit1 = 0.00, -- Escena 1
+	postit2 = 5.20, -- Escena 2
+	postit3 = 9.75,
+	postit4 = 12.45, -- Escena 3
+	postit5 = 16.60,
+	postit6 = 17.95, -- Escena 4
+	postit7 = 21.10,
+	postit8 = 23.75, -- Escena 5
+	postit9 = 26.95,
+	postit10 = 32.55, -- Escena 6
+	postit11 = 41.80,
+}
+local FIN = 47.0
+
+local function en(voz, mas)
+	return VOZ[voz] + (mas or 0)
+end
+
+local NOTA_AMARILLA = Color3.fromRGB(255, 225, 60)
+local NOTA_ROSA = Color3.fromRGB(255, 160, 190)
+local NOTA_AZUL = Color3.fromRGB(140, 205, 245)
+local NOTA_VERDE = Color3.fromRGB(170, 230, 140)
+
+return {
+	Entorno = "Laboratorio",
+
+	Reparto = {
+		Spencer = "Spencer",
+		Art = "Art",
+	},
+
+	Posiciones = {
+		Spencer = "Pos_TrasMesa",
+		Art = { Marca = "Pos_A", MirarA = "Camara" },
+	},
+
+	-- Objetos: los que tienen En / EnManoDe aparecen al empezar; el resto se usan más tarde.
+	Objetos = {
+		Muestra = { Modelo = "PapelAdhesivo", EnManoDe = "Spencer" }, -- el papel con el pegamento de Spencer
+		Bote = { Modelo = "Pegamento", En = "Obj_1" },
+		Recuerdo = { Modelo = "PapelAdhesivo" }, -- el que aparece en el flashback
+		Cancionero = { Modelo = "Cancionero" },
+		CancioneroAbierto = { Modelo = "CancioneroAbierto" },
+		Marcapaginas = { Modelo = "Marcapaginas" },
+		Bloc = { Modelo = "BlocNotas" },
+		CajaA = { Modelo = "CajaNotas" },
+		CajaB = { Modelo = "CajaNotas" },
+		CajaC = { Modelo = "CajaNotas" },
+		Nota1 = { Modelo = "NotaAmarilla", Texto = "¡Reunión 3pm!", Color = NOTA_AMARILLA },
+		Nota2 = { Modelo = "NotaAmarilla", Texto = "Llamar a Bob", Color = NOTA_ROSA },
+		Nota3 = { Modelo = "NotaAmarilla", Texto = "Comprar café", Color = NOTA_AZUL },
+		Nota4 = { Modelo = "NotaAmarilla", Texto = "¡Funciona!", Color = NOTA_AMARILLA },
+		Nota5 = { Modelo = "NotaAmarilla", Texto = "Ensayo jueves", Color = NOTA_VERDE },
+		Nota6 = { Modelo = "NotaAmarilla", Texto = "No tocar :)", Color = NOTA_AMARILLA },
+	},
+
+	-- Plano inicial: Art habla a cámara (gancho)
+	Camara = { Plano = "PrimerPlano", Actor = "Art", Angulo = 0 },
+
+	Pasos = {
+		--======================================================================
+		-- ESCENA 1 · El pegamento que no pegaba (Laboratorio)
+		-- ART: «¿Te interesa saber cómo se creó el primer Post-it?
+		--       ¡Todo comenzó con un pegamento que parecía un fracaso!»
+		--======================================================================
+		-- Gancho: Art mira a cámara y habla (labios solo en la primera frase)
+		{ T = en("postit1"), Accion = "Voz", Voz = "postit1", Actor = "Art", Labios = true, LabiosHasta = 2.05, Gestos = true },
+		{ T = en("postit1"), Accion = "Gesto", Actor = "Spencer", Gesto = "Examinar", Duracion = 2 },
+
+		-- «¡Todo comenzó con un pegamento...»: Spencer pega el papel en el tablón
+		{ T = en("postit1", 2.05), Accion = "Camara", Plano = "General", Actores = { "Art", "Spencer" }, Inclinacion = 6, Holgura = 1.05 },
+		{ T = en("postit1", 2.05), Accion = "Mirar", Actor = "Art", A = "Spencer" },
+		{ T = en("postit1", 2.15), Accion = "Pegar", Actor = "Spencer", Objeto = "Muestra", En = "Pared_1" },
+		-- «...que parecía un fracaso!»: el papel se despega y cae
+		{ T = en("postit1", 3.2), Accion = "Caer", Objeto = "Muestra", Tiempo = 0.85 },
+		{ T = en("postit1", 3.35), Accion = "Expresion", Actor = "Art", Expresion = "Curiosidad", Duracion = 2.2 },
+		-- Spencer lo recoge del suelo y se acerca a Art
+		{ T = en("postit1", 4.15), Accion = "Recoger", Actor = "Spencer", Objeto = "Muestra" },
+		{ T = en("postit1", 4.95), Accion = "Expresion", Actor = "Spencer", Expresion = "Feliz", Duracion = 4.4 },
+		{ T = en("postit1", 5.0), Accion = "Caminar", Actor = "Spencer", Hasta = "Art", Distancia = 2.5, MirarA = "Art" },
+
+		--======================================================================
+		-- ESCENA 2 · Un invento inútil (Laboratorio)
+		-- SPENCER: «¡He creado un pegamento especial! Se pega, pero puedes quitarlo sin problemas».
+		-- ART: «¿Y para qué sirve eso?».
+		--======================================================================
+		{ T = en("postit2"), Accion = "Voz", Voz = "postit2" },
+		{ T = en("postit2", 0.35), Accion = "Camara", Plano = "DosPersonajes", Actores = { "Spencer", "Art" }, Angulo = 0 },
+		-- «¡He creado un pegamento especial!»: Spencer enseña el papel, orgulloso
+		{ T = en("postit2", 0.4), Accion = "Gesto", Actor = "Spencer", Gesto = "Mostrar", Duracion = 1.1 },
+		{ T = en("postit2", 0.4), Accion = "Expresion", Actor = "Art", Expresion = "Curiosidad", Duracion = 3.6 },
+		-- Se lo entrega a Art
+		{ T = en("postit2", 1.55), Accion = "Entregar", De = "Spencer", A = "Art" },
+		-- «Se pega...»: Art lo pega en la pizarra
+		{ T = en("postit2", 2.7), Accion = "Pegar", Actor = "Art", Objeto = "Muestra", En = "Pared_2" },
+		-- «...pero puedes quitarlo sin problemas»: y lo despega
+		{ T = en("postit2", 3.65), Accion = "Recoger", Actor = "Art", Objeto = "Muestra" },
+
+		-- ART: «¿Y para qué sirve eso?» mirando el papel con curiosidad
+		{ T = en("postit3", -0.43), Accion = "Mirar", Actor = "Art", A = "Camara" },
+		{ T = en("postit3", -0.4), Accion = "Gesto", Actor = "Art", Gesto = "Examinar", Mantener = true },
+		{ T = en("postit3", -0.05), Accion = "Camara", Plano = "Personaje", Actor = "Art", Angulo = 0 },
+		{ T = en("postit3"), Accion = "Voz", Voz = "postit3" },
+		{ T = en("postit3"), Accion = "Expresion", Actor = "Art", Expresion = "Duda", Duracion = 1.5 },
+		-- Spencer se encoge de hombros
+		{ T = en("postit3", 1.4), Accion = "Camara", Plano = "DosPersonajes", Actores = { "Art", "Spencer" }, Angulo = 0 },
+		{ T = en("postit3", 1.4), Accion = "Gesto", Actor = "Spencer", Gesto = "Encogerse", Duracion = 0.9 },
+		{ T = en("postit3", 1.4), Accion = "Expresion", Actor = "Spencer", Expresion = "Duda", Duracion = 0.9 },
+
+		-- Fundido a negro: saltamos a 1974
+		{ T = en("postit3", 2.1), Accion = "Fundido", Entrada = 0.3, Mantener = 0.3, Salida = 0.4 },
+
+		--======================================================================
+		-- ESCENA 3 · Mi pequeño problema (Sala de ensayo)
+		-- ART (NARRADOR): «En 1974 tenía un problema: ¡mis marcapáginas siempre acababan en el suelo!».
+		-- ART: «¡Otra vez no!».
+		--======================================================================
+		{ T = en("postit4", -0.3), Accion = "Entorno", Nombre = "SalaEnsayo" },
+		{ T = en("postit4", -0.3), Accion = "Sentar", Actor = "Art", En = "Silla_1" },
+		{ T = en("postit4", -0.3), Accion = "Objeto", Objeto = "Muestra", En = "Obj_Nota" }, -- Art se guardó la muestra
+		{ T = en("postit4", -0.3), Accion = "Objeto", Objeto = "Cancionero", En = "Obj_Libro" },
+		{ T = en("postit4", -0.3), Accion = "Objeto", Objeto = "Marcapaginas", En = "Obj_Papeles" },
+		{ T = en("postit4", -0.3), Accion = "Camara", Plano = "Fija", Marca = "Cam_General", Acercar = 3, TiempoAcercar = 1.4 },
+		{ T = en("postit4", -0.15), Accion = "Texto", Texto = "1974", Estilo = "Rotulo", Duracion = 2.6 },
+		{ T = en("postit4"), Accion = "Voz", Voz = "postit4" },
+
+		-- «tenía un problema»: abre el cancionero
+		{ T = en("postit4", 1.1), Accion = "Camara", Plano = "Personaje", Actor = "Art", Angulo = 12, Acercar = 0.6, TiempoAcercar = 3 },
+		{ T = en("postit4", 1.15), Accion = "Gesto", Actor = "Art", Gesto = "AlcanzarMesa", Duracion = 0.7 },
+		{ T = en("postit4", 1.55), Accion = "Objeto", Objeto = "Cancionero", Visible = false },
+		{ T = en("postit4", 1.55), Accion = "Objeto", Objeto = "CancioneroAbierto", En = "Obj_Libro" },
+		-- Coge un marcapáginas y lo pone entre las páginas
+		{ T = en("postit4", 2.05), Accion = "Recoger", Actor = "Art", Objeto = "Marcapaginas" },
+		{ T = en("postit4", 2.7), Accion = "Soltar", Actor = "Art", En = "CancioneroAbierto", Desplazamiento = Vector3.new(0.25, 0, 0) },
+		-- «...acababan en el suelo!»: se escurre y cae
+		{ T = en("postit4", 3.2), Accion = "Camara", Plano = "Personaje", Actor = "Art", Encuadre = "Cuerpo", Angulo = 18 },
+		{ T = en("postit4", 3.25), Accion = "Caer", Objeto = "Marcapaginas", Hasta = "Suelo_Libro", Tiempo = 0.75 },
+
+		-- Art mira al suelo, frustrado: «¡Otra vez no!»
+		{ T = en("postit5", -0.15), Accion = "Gesto", Actor = "Art", Gesto = "MirarAbajo", Mantener = true },
+		{ T = en("postit5", -0.15), Accion = "Expresion", Actor = "Art", Expresion = "Frustracion", Duracion = 1.5 },
+		{ T = en("postit5", -0.1), Accion = "Camara", Plano = "PrimerPlano", Actor = "Art", Angulo = 0, Inclinacion = 4 },
+		{ T = en("postit5"), Accion = "Voz", Voz = "postit5" },
+		{ T = en("postit5", 0.25), Accion = "Gesto", Actor = "Art", Gesto = "Lamentarse", Duracion = 0.9 },
+
+		--======================================================================
+		-- ESCENA 4 · ¡Eureka! (Sala de ensayo + recuerdo del laboratorio)
+		-- ART (NARRADOR): «Entonces recordé aquel extraño pegamento y tuve una idea».
+		-- ART: «¡Espera! ¿Y si lo utilizo para crear un marcapáginas?».
+		--======================================================================
+		{ T = en("postit6", -0.2), Accion = "Camara", Plano = "Personaje", Actor = "Art", Angulo = -12 },
+		{ T = en("postit6", -0.2), Accion = "Gesto", Actor = "Art", Gesto = "Pensar", Duracion = 1.2 },
+		{ T = en("postit6", -0.2), Accion = "Expresion", Actor = "Art", Expresion = "Pensativo", Duracion = 1 },
+		{ T = en("postit6"), Accion = "Voz", Voz = "postit6" },
+
+		-- «recordé aquel extraño pegamento»: flashback en sepia
+		{ T = en("postit6", 0.6), Accion = "Fundido", Color = "Blanco", Entrada = 0.12, Mantener = 0.08, Salida = 0.25 },
+		{ T = en("postit6", 0.8), Accion = "Entorno", Nombre = "Laboratorio" },
+		{ T = en("postit6", 0.8), Accion = "Ocultar", Actor = "Art" },
+		{ T = en("postit6", 0.8), Accion = "Colocar", Actor = "Spencer", En = "Pos_TrasMesa" },
+		{ T = en("postit6", 0.8), Accion = "Objeto", Objeto = "Recuerdo", EnManoDe = "Spencer" },
+		{ T = en("postit6", 0.8), Accion = "Filtro", Filtro = "Recuerdo" },
+		{ T = en("postit6", 0.8), Accion = "Camara", Plano = "Personaje", Actor = "Spencer", Angulo = 0, Acercar = 0.8, TiempoAcercar = 1.1 },
+		{ T = en("postit6", 0.85), Accion = "Gesto", Actor = "Spencer", Gesto = "Mostrar", Mantener = true },
+		{ T = en("postit6", 0.85), Accion = "Expresion", Actor = "Spencer", Expresion = "Feliz", Duracion = 1.1 },
+
+		-- «y tuve una idea»: vuelta a la sala, ¡idea!
+		{ T = en("postit6", 1.85), Accion = "Fundido", Color = "Blanco", Entrada = 0.12, Mantener = 0.08, Salida = 0.25 },
+		{ T = en("postit6", 2.05), Accion = "Filtro", Filtro = "Ninguno" },
+		{ T = en("postit6", 2.05), Accion = "Entorno", Nombre = "SalaEnsayo" },
+		{ T = en("postit6", 2.05), Accion = "Camara", Plano = "Personaje", Actor = "Art", Angulo = 0 },
+		{ T = en("postit6", 2.1), Accion = "Gesto", Actor = "Art", Gesto = "Idea", Duracion = 1.3 },
+		{ T = en("postit6", 2.1), Accion = "Expresion", Actor = "Art", Expresion = "Idea", Duracion = 1.6 },
+		{ T = en("postit6", 2.15), Accion = "Texto", Texto = "💡", Estilo = "Icono", Duracion = 1.3, Posicion = Vector2.new(0.72, 0.2) },
+
+		-- «¡Espera! ¿Y si lo utilizo para crear un marcapáginas?»: coge la muestra y la pega en la página
+		{ T = en("postit7"), Accion = "Voz", Voz = "postit7" },
+		{ T = en("postit7"), Accion = "Camara", Plano = "Personaje", Actor = "Art", Angulo = 8, Acercar = 0.8, TiempoAcercar = 2.2 },
+		{ T = en("postit7", 0.65), Accion = "Recoger", Actor = "Art", Objeto = "Muestra" },
+		{ T = en("postit7", 1.2), Accion = "Pegar", Actor = "Art", Objeto = "Muestra", En = "CancioneroAbierto", Desplazamiento = Vector3.new(0.55, 0, -0.35) },
+		{ T = en("postit7", 1.8), Accion = "Expresion", Actor = "Art", Expresion = "Feliz", Duracion = 1.2 },
+		{ T = en("postit7", 1.85), Accion = "Gesto", Actor = "Art", Gesto = "Asentir", Duracion = 0.8 },
+
+		--======================================================================
+		-- ESCENA 5 · ¡Funciona! (Laboratorio)
+		-- ART: «¡Funciona! ¡No se cae y puedo quitarlo sin romper nada!».
+		-- ART (NARRADOR): «Después empezamos a utilizarlos para dejar mensajes.
+		--                  ¡Habíamos encontrado algo mucho más útil que un simple marcapáginas!».
+		--======================================================================
+		{ T = en("postit8", -0.2), Accion = "Fundido", Entrada = 0.15, Mantener = 0.05, Salida = 0.25 },
+		{ T = en("postit8"), Accion = "Entorno", Nombre = "Laboratorio" },
+		{ T = en("postit8"), Accion = "Objeto", Objeto = "Recuerdo", Visible = false },
+		{ T = en("postit8"), Accion = "Colocar", Actor = "Spencer", En = "Pos_TrasMesa" },
+		{ T = en("postit8"), Accion = "Colocar", Actor = "Art", En = "Pos_A" },
+		{ T = en("postit8"), Accion = "Objeto", Objeto = "CancioneroAbierto", En = "Obj_2" },
+		{ T = en("postit8"), Accion = "Objeto", Objeto = "Muestra", En = "CancioneroAbierto", Desplazamiento = Vector3.new(0.55, 0, -0.35) },
+		{ T = en("postit8"), Accion = "Camara", Plano = "DosPersonajes", Actores = { "Art", "Spencer" }, Angulo = 0 },
+		{ T = en("postit8"), Accion = "Voz", Voz = "postit8" },
+		-- «¡Funciona!»: Art señala el papel pegado
+		{ T = en("postit8", 0.05), Accion = "Senalar", Actor = "Art", A = "CancioneroAbierto", Duracion = 1.1 },
+		{ T = en("postit8", 0.05), Accion = "Expresion", Actor = "Art", Expresion = "Feliz", Duracion = 2.9 },
+		{ T = en("postit8", 0.1), Accion = "Mirar", Actor = "Spencer", A = "CancioneroAbierto", SoloCabeza = true },
+		-- «¡No se cae y puedo quitarlo sin romper nada!»: Spencer lo quita y lo vuelve a pegar
+		{ T = en("postit8", 1.3), Accion = "Camara", Plano = "Personaje", Actor = "Spencer", Angulo = 0 },
+		{ T = en("postit8", 1.35), Accion = "Recoger", Actor = "Spencer", Objeto = "Muestra" },
+		{ T = en("postit8", 2.1), Accion = "Pegar", Actor = "Spencer", Objeto = "Muestra", En = "CancioneroAbierto", Desplazamiento = Vector3.new(0.55, 0, -0.35) },
+		-- Art observa satisfecho
+		{ T = en("postit8", 2.7), Accion = "Camara", Plano = "DosPersonajes", Actores = { "Art", "Spencer" }, Angulo = 0, Transicion = 0.5 },
+		{ T = en("postit8", 2.75), Accion = "Gesto", Actor = "Art", Gesto = "Asentir", Duracion = 1 },
+		{ T = en("postit8", 2.75), Accion = "Expresion", Actor = "Art", Expresion = "Orgullo", Duracion = 2 },
+		{ T = en("postit8", 2.75), Accion = "Expresion", Actor = "Spencer", Expresion = "Feliz", Duracion = 2 },
+
+		-- «Después empezamos a utilizarlos para dejar mensajes»: el tablón se llena de notas
+		{ T = en("postit9"), Accion = "Voz", Voz = "postit9" },
+		{ T = en("postit9", 0.1), Accion = "Camara", Plano = "Fija", Marca = "Cam_Tablon", Acercar = 0.8, TiempoAcercar = 2.4 },
+		{ T = en("postit9", 0.3), Accion = "Aparecer", Objeto = "Nota1", En = "Nota_1" },
+		{ T = en("postit9", 0.6), Accion = "Aparecer", Objeto = "Nota2", En = "Nota_2" },
+		{ T = en("postit9", 0.9), Accion = "Aparecer", Objeto = "Nota3", En = "Nota_3" },
+		{ T = en("postit9", 1.2), Accion = "Aparecer", Objeto = "Nota4", En = "Nota_4" },
+		{ T = en("postit9", 1.5), Accion = "Aparecer", Objeto = "Nota5", En = "Nota_5" },
+		{ T = en("postit9", 1.8), Accion = "Aparecer", Objeto = "Nota6", En = "Nota_6" },
+		-- «¡Habíamos encontrado algo mucho más útil...»: se miran, satisfechos
+		{ T = en("postit9", 2.35), Accion = "Camara", Plano = "DosPersonajes", Actores = { "Art", "Spencer" }, Angulo = 0, Transicion = 0.5 },
+		{ T = en("postit9", 2.4), Accion = "Mirar", Actor = "Art", A = "Spencer" },
+		{ T = en("postit9", 2.4), Accion = "Mirar", Actor = "Spencer", A = "Art" },
+		{ T = en("postit9", 2.4), Accion = "Expresion", Actor = "Art", Expresion = "Orgullo", Duracion = 1.6 },
+		-- «...que un simple marcapáginas!»: celebran
+		{ T = en("postit9", 4.05), Accion = "Gesto", Actor = "Spencer", Gesto = "BrazoArriba", Duracion = 1.1 },
+		{ T = en("postit9", 4.05), Accion = "Expresion", Actor = "Spencer", Expresion = "Feliz", Duracion = 1.4 },
+		{ T = en("postit9", 4.1), Accion = "Gesto", Actor = "Art", Gesto = "Asentir", Duracion = 1 },
+		{ T = en("postit9", 4.1), Accion = "Expresion", Actor = "Art", Expresion = "Feliz", Duracion = 1.4 },
+
+		--======================================================================
+		-- ESCENA 6 · Un fracaso convertido en éxito (Laboratorio, 1980)
+		-- ART (NARRADOR): «En 1980 llegaron oficialmente a las tiendas como Post-it.
+		--                  ¡Y todo gracias a un pegamento que parecía inútil!».
+		-- SPENCER: «¡Al final sí que servía para algo!».
+		--======================================================================
+		{ T = en("postit10", -0.4), Accion = "Fundido", Entrada = 0.2, Mantener = 0.2, Salida = 0.35 },
+		{ T = en("postit10", -0.2), Accion = "Colocar", Actor = "Art", En = "Pos_C" },
+		{ T = en("postit10", -0.2), Accion = "Objeto", Objeto = "Bloc", EnManoDe = "Art" },
+		{ T = en("postit10", -0.2), Accion = "Colocar", Actor = "Spencer", En = "Pos_D" },
+		{ T = en("postit10", -0.2), Accion = "Objeto", Objeto = "CajaA", En = "Obj_3" },
+		{ T = en("postit10", -0.2), Accion = "Objeto", Objeto = "CajaB", En = "Obj_4" },
+		{ T = en("postit10", -0.2), Accion = "Objeto", Objeto = "CajaC", En = "Suelo_1" },
+		{ T = en("postit10", -0.2), Accion = "Camara", Plano = "Fija", Marca = "Cam_General", Acercar = 2.5, TiempoAcercar = 1.8 },
+		{ T = en("postit10"), Accion = "Voz", Voz = "postit10" },
+		-- «En 1980...»
+		{ T = en("postit10", 0.1), Accion = "Texto", Texto = "1980", Estilo = "Rotulo", Duracion = 2.4 },
+		-- «...llegaron oficialmente a las tiendas como Post-it»: Art presenta el bloc
+		{ T = en("postit10", 1.65), Accion = "Camara", Plano = "Personaje", Actor = "Art", Angulo = 0, Acercar = 0.8, TiempoAcercar = 2.4 },
+		{ T = en("postit10", 1.65), Accion = "Postura", Actor = "Art", Postura = "Mostrar" },
+		{ T = en("postit10", 1.65), Accion = "Expresion", Actor = "Art", Expresion = "Orgullo", Duracion = 2.5 },
+		-- «¡Y todo gracias a un pegamento...»: Spencer se acerca
+		{ T = en("postit10", 4.15), Accion = "Camara", Plano = "DosPersonajes", Actores = { "Art", "Spencer" }, Angulo = 0, Seguir = true },
+		{ T = en("postit10", 4.2), Accion = "Caminar", Actor = "Spencer", Hasta = "Art", Distancia = 2.4, MirarA = "Bloc" },
+		-- Ambos miran el bloc
+		{ T = en("postit10", 5.35), Accion = "Gesto", Actor = "Art", Gesto = "MirarAbajo", Mantener = true },
+		{ T = en("postit10", 5.35), Accion = "Mirar", Actor = "Spencer", A = "Bloc", SoloCabeza = true },
+		-- «...que parecía inútil!»
+		{ T = en("postit10", 7.35), Accion = "Gesto", Actor = "Spencer", Gesto = "Asentir", Duracion = 1 },
+		{ T = en("postit10", 7.35), Accion = "Expresion", Actor = "Spencer", Expresion = "Orgullo", Duracion = 1.8 },
+
+		-- SPENCER: «¡Al final sí que servía para algo!» (a cámara)
+		{ T = en("postit11", -0.5), Accion = "Mirar", Actor = "Spencer", A = "Camara" },
+		{ T = en("postit11", -0.5), Accion = "Gesto", Actor = "Art", Gesto = "Asentir", Duracion = 0.8 },
+		{ T = en("postit11", -0.12), Accion = "Camara", Plano = "PrimerPlano", Actor = "Spencer", Angulo = 0 },
+		{ T = en("postit11"), Accion = "Voz", Voz = "postit11", Gestos = true },
+		{ T = en("postit11"), Accion = "Expresion", Actor = "Spencer", Expresion = "Feliz", Duracion = 1.8 },
+
+		-- «¡DE FRACASO A INVENTO MILLONARIO!»
+		{ T = en("postit11", 1.7), Accion = "Camara", Plano = "General", Actores = { "Art", "Spencer" }, Inclinacion = 4, Transicion = 0.6 },
+		{ T = en("postit11", 1.75), Accion = "Postura", Actor = "Art", Postura = "Ninguna" },
+		{ T = en("postit11", 1.75), Accion = "Gesto", Actor = "Art", Gesto = "BrazoArriba", Mantener = true },
+		{ T = en("postit11", 1.75), Accion = "Gesto", Actor = "Spencer", Gesto = "BrazoArriba", Mantener = true },
+		{ T = en("postit11", 1.75), Accion = "Expresion", Actor = "Art", Expresion = "Feliz" },
+		{ T = en("postit11", 1.75), Accion = "Expresion", Actor = "Spencer", Expresion = "Feliz" },
+		{ T = en("postit11", 1.85), Accion = "Texto", Texto = "¡DE FRACASO A INVENTO MILLONARIO!", Estilo = "Titulo", Duracion = FIN - en("postit11", 1.85), Posicion = Vector2.new(0.5, 0.22) },
+
+		{ T = FIN, Accion = "Esperar", Tiempo = 0 },
 	},
 }
 ]=======] },

@@ -26,7 +26,21 @@ local ARTICULACIONES = {
 	LeftShoulder = true,
 	LeftElbow = true,
 	LeftWrist = true,
+	RightHip = true,
+	LeftHip = true,
+	RightKnee = true,
+	LeftKnee = true,
 }
+
+-- Atuendos se carga al usarse (expresiones de la cara)
+local cacheAtuendos = nil
+local function Atuendos()
+	if not cacheAtuendos then
+		local m = script.Parent:FindFirstChild("Atuendos")
+		cacheAtuendos = m and require(m) or false
+	end
+	return cacheAtuendos or nil
+end
 
 local function plano(v)
 	local p = Vector3.new(v.X, 0, v.Z)
@@ -76,6 +90,8 @@ function Actor.new(modelo, rol)
 	self.Rotaciones = {}
 	self.GiroCabeza = 0
 	self.Postura = nil -- gesto de reposo (p. ej. "Sostener" cuando lleva algo)
+	self.PosturaManual = nil -- gesto de reposo fijado desde la escena (acción "Postura")
+	self.PosturaPiernas = nil -- postura de piernas ("Sentado")
 	self.TokenGesto = 0
 	self.TokenMovimiento = 0
 	self.Objeto = nil
@@ -116,6 +132,16 @@ function Actor.new(modelo, rol)
 	-- Anchura relativa al R15 estándar (torso de 2 studs): la usan las cámaras
 	local torso = modelo:FindFirstChild("UpperTorso")
 	self.EscalaAncho = torso and math.max(torso.Size.X / 2, 0.5) or 1
+	-- Altura de la cadera respecto a la raíz y grosor del muslo (para sentarse)
+	local cadera3d = self.Motores.RightHip
+	if cadera3d and cadera3d.Part0 then
+		self.AlturaCadera = (cadera3d.Part0.CFrame * cadera3d.C0).Position.Y - raiz.Position.Y
+	end
+	if not self.AlturaCadera or self.AlturaCadera > 0 or self.AlturaCadera < -2.5 then
+		self.AlturaCadera = -self.AlturaRaiz / 3
+	end
+	local muslo = modelo:FindFirstChild("RightUpperLeg")
+	self.GrosorMuslo = muslo and muslo.Size.Z or 1
 
 	-- Animaciones
 	local animator = humanoid:FindFirstChildOfClass("Animator")
@@ -227,6 +253,83 @@ function Actor:MoverBoca(duracion)
 	return duracion
 end
 
+--[[
+	Mueve la boca siguiendo la envolvente de volumen de un audio (Modulos > Voces):
+	una cadena de cifras 0-9, una cada "paso" segundos. "hasta" limita los segundos
+	(por ejemplo, para mover los labios solo en la primera frase).
+]]
+function Actor:MoverBocaEnvolvente(envolvente, paso, hasta)
+	local cara = self.Cara
+	local reposo = cara and cara:FindFirstChild("BocaReposo")
+	local habla = cara and cara:FindFirstChild("BocaHabla")
+	if not reposo or not habla or not envolvente then
+		return 0
+	end
+	paso = paso or 0.05
+	local total = #envolvente * paso
+	if hasta then
+		total = math.min(total, hasta)
+	end
+	self.TokenBoca = self.TokenBoca + 1
+	local token = self.TokenBoca
+	task.spawn(function()
+		local inicio = os.clock()
+		local ultimo = -1
+		while self.TokenBoca == token and cara.Parent do
+			local t = os.clock() - inicio
+			if t >= total then
+				break
+			end
+			local i = math.floor(t / paso) + 1
+			if i ~= ultimo then
+				ultimo = i
+				local v = (tonumber(envolvente:sub(i, i)) or 0) / 9
+				if v < 0.3 then
+					reposo.Visible = true
+					habla.Visible = false
+				else
+					reposo.Visible = false
+					habla.Visible = true
+					TweenService:Create(habla, TweenInfo.new(paso), {
+						Size = UDim2.fromScale(0.12 + 0.1 * v, 0.03 + 0.14 * v),
+					}):Play()
+				end
+			end
+			task.wait()
+		end
+		if self.TokenBoca == token then
+			reposo.Visible = true
+			habla.Visible = false
+		end
+	end)
+	return total
+end
+
+-- Cambia la expresión de la cara (Atuendos.Expresiones). duracion = nil → se mantiene.
+-- nombre = nil → vuelve a la cara base.
+function Actor:Expresion(nombre, duracion)
+	local A = Atuendos()
+	if not self.Cara or not A then
+		return 0
+	end
+	self.TokenExpresion = (self.TokenExpresion or 0) + 1
+	local token = self.TokenExpresion
+	local parpado = A.Expresar(self.Cara, nombre)
+	for _, p in ipairs(self.Parpados or {}) do
+		local alto = parpado or p:GetAttribute("AltoBase") or 0.06
+		p:SetAttribute("Alto", alto)
+		TweenService:Create(p, TweenInfo.new(0.15), { Size = UDim2.fromScale(1.2, alto) }):Play()
+	end
+	if duracion and nombre then
+		task.delay(duracion, function()
+			if self.TokenExpresion == token then
+				self:Expresion(nil)
+			end
+		end)
+	end
+	return 0
+end
+
 -- POSICIÓN ---------------------------------------------------------------------
 
 function Actor:PosicionSuelo()
@@ -253,10 +356,36 @@ end
 -- Coloca al personaje de pie sobre un punto del suelo, mirando en "direccion".
 function Actor:Colocar(posSuelo, direccion)
 	self:_cancelarMovimiento()
+	-- Colocar deja al personaje de pie y en su postura de reposo
+	self.PosturaPiernas = nil
+	self.TokenGesto = self.TokenGesto + 1
+	self:_postura(nil)
+	self:_aplicar(0)
 	local pos = posSuelo + Vector3.new(0, self.AlturaRaiz, 0)
 	local dir = plano(direccion or self.Raiz.CFrame.LookVector)
 	self.Raiz.CFrame = CFrame.lookAt(pos, pos + dir)
 	self:Base("Quieto")
+end
+
+-- Sienta al personaje: "asiento" es el punto central de la superficie del asiento.
+function Actor:Sentar(asiento, direccion)
+	self:_cancelarMovimiento()
+	local dir = plano(direccion or self.Raiz.CFrame.LookVector)
+	local y = asiento.Y - self.AlturaCadera + self.GrosorMuslo / 2
+	-- la cadera queda un poco hacia el respaldo
+	local pos = Vector3.new(asiento.X, y, asiento.Z) - dir * 0.25
+	self.Raiz.CFrame = CFrame.lookAt(pos, pos + dir)
+	self.PosturaPiernas = "Sentado"
+	self:Base("Quieto")
+	self:_postura(nil)
+	self:_aplicar(0)
+end
+
+-- Fija (o quita con nil) un gesto de reposo que se mantiene debajo de los demás gestos.
+function Actor:FijarPostura(nombre, tiempo)
+	self.PosturaManual = nombre
+	self:_postura(nil)
+	self:_aplicar(tiempo or 0.3)
 end
 
 -- Gira el cuerpo hacia una dirección horizontal. Devuelve la duración.
@@ -264,6 +393,10 @@ function Actor:Girar(direccion, tiempo)
 	tiempo = tiempo or 0.35
 	local pos = self.Raiz.Position
 	local objetivo = CFrame.lookAt(pos, pos + plano(direccion))
+	-- Si ya mira hacia ahí (menos de 10 grados), no gasta tiempo en girar
+	if tiempo > 0 and self.Raiz.CFrame.LookVector:Dot(objetivo.LookVector) > 0.985 then
+		return 0
+	end
 	if tiempo <= 0 then
 		if self.Tween then
 			self.Tween:Cancel()
@@ -358,7 +491,14 @@ end
 
 function Actor:_postura(fotograma)
 	local rot = {}
-	local reposo = self.Postura and Animaciones.Gestos[self.Postura]
+	local piernas = self.PosturaPiernas and Animaciones.Piernas and Animaciones.Piernas[self.PosturaPiernas]
+	if piernas then
+		for k, v in pairs(piernas) do
+			rot[k] = aVector(v)
+		end
+	end
+	local nombreReposo = self.PosturaManual or self.Postura
+	local reposo = nombreReposo and Animaciones.Gestos[nombreReposo]
 	if reposo then
 		for k, v in pairs(reposo.Fotogramas[1]) do
 			rot[k] = aVector(v)

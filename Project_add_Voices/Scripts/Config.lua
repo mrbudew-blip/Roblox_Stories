@@ -10,12 +10,12 @@ local Config = {}
 
 -- Escena que se reproduce al pulsar Play.
 -- Es el nombre de un ModuleScript dentro de StoryTemplate > Escenas.
-Config.EscenaActiva = "Prueba_Plantilla"
+Config.EscenaActiva = "Historia_PostIt"
 
 -- FORMATO VERTICAL ---------------------------------------------------------
 Config.Aspecto = 9 / 16 -- proporción del vídeo (ancho / alto)
 Config.BandasNegras = true -- tapa en negro todo lo que queda fuera del 9:16
-Config.MostrarGuias = true -- dibuja la zona segura. Ponlo en false para grabar
+Config.MostrarGuias = false -- dibuja la zona segura y el reloj t=. Ponlo en true para revisar el encuadre
 Config.CampoVision = 40 -- campo de visión vertical de la cámara (grados)
 Config.TransicionCamara = 0 -- transición por defecto entre planos (0 = corte)
 
@@ -24,6 +24,10 @@ Config.RetrasoInicio = 2 -- segundos de espera antes del primer paso (para empez
 Config.Repetir = false -- vuelve a empezar la escena al terminar
 Config.OcultarInterfazRoblox = true -- oculta chat, lista de jugadores, etc.
 Config.OcultarRaton = true -- oculta el cursor dentro del juego
+Config.CuentaAtras = false -- muestra 3-2-1 antes del primer paso (referencia para montar el audio)
+
+-- AUDIO --------------------------------------------------------------------
+Config.Subtitulos = false -- muestra el texto de cada voz (Modulos > Voces) abajo, en la zona segura
 
 -- MOVIMIENTO ---------------------------------------------------------------
 Config.VelocidadCaminar = 7 -- studs por segundo

@@ -1,0 +1,101 @@
+[
+  {
+    "Nombre": "postit1",
+    "Archivo": "postit1.WAV",
+    "Personaje": "Art",
+    "Tipo": "Narrador",
+    "Escena": 1,
+    "Texto": "¿Te interesa saber cómo se creó el primer Post-it? ¡Todo comenzó con un pegamento que parecía un fracaso!",
+    "Id": "112400743441885"
+  },
+  {
+    "Nombre": "postit2",
+    "Archivo": "postit2.WAV",
+    "Personaje": "Spencer",
+    "Tipo": "Dialogo",
+    "Escena": 2,
+    "Texto": "¡He creado un pegamento especial! Se pega, pero puedes quitarlo sin problemas.",
+    "Id": "73048597437669"
+  },
+  {
+    "Nombre": "postit3",
+    "Archivo": "postit3.WAV",
+    "Personaje": "Art",
+    "Tipo": "Dialogo",
+    "Escena": 2,
+    "Texto": "¿Y para qué sirve eso?",
+    "Id": "121842356559664"
+  },
+  {
+    "Nombre": "postit4",
+    "Archivo": "postit4.WAV",
+    "Personaje": "Art",
+    "Tipo": "Narrador",
+    "Escena": 3,
+    "Texto": "En 1974 tenía un problema: ¡mis marcapáginas siempre acababan en el suelo!",
+    "Id": "135160250082727"
+  },
+  {
+    "Nombre": "postit5",
+    "Archivo": "postit5.WAV",
+    "Personaje": "Art",
+    "Tipo": "Dialogo",
+    "Escena": 3,
+    "Texto": "¡Otra vez no!",
+    "Id": "140254214115431"
+  },
+  {
+    "Nombre": "postit6",
+    "Archivo": "postit6.WAV",
+    "Personaje": "Art",
+    "Tipo": "Narrador",
+    "Escena": 4,
+    "Texto": "Entonces recordé aquel extraño pegamento y tuve una idea.",
+    "Id": "7474276044230"
+  },
+  {
+    "Nombre": "postit7",
+    "Archivo": "postit7.WAV",
+    "Personaje": "Art",
+    "Tipo": "Dialogo",
+    "Escena": 4,
+    "Texto": "¡Espera! ¿Y si lo utilizo para crear un marcapáginas?",
+    "Id": "118988480490208"
+  },
+  {
+    "Nombre": "postit8",
+    "Archivo": "postit8.WAV",
+    "Personaje": "Art",
+    "Tipo": "Dialogo",
+    "Escena": 5,
+    "Texto": "¡Funciona! ¡No se cae y puedo quitarlo sin romper nada!",
+    "Id": "79697612206428"
+  },
+  {
+    "Nombre": "postit9",
+    "Archivo": "postit9.WAV",
+    "Personaje": "Art",
+    "Tipo": "Narrador",
+    "Escena": 5,
+    "Texto": "Después empezamos a utilizarlos para dejar mensajes. ¡Habíamos encontrado algo mucho más útil que un simple marcapáginas!",
+    "Id": "105692879107754"
+  },
+  {
+    "Nombre": "postit10",
+    "Archivo": "postit10.WAV",
+    "Personaje": "Art",
+    "Tipo": "Narrador",
+    "Escena": 6,
+    "Texto": "En 1980 llegaron oficialmente a las tiendas como Post-it. ¡Y todo gracias a un pegamento que parecía inútil!",
+    "Id": "131840630034624"
+  },
+  {
+    "Nombre": "postit11",
+    "Archivo": "postit11.WAV",
+    "Personaje": "Spencer",
+    "Tipo": "Dialogo",
+    "Escena": 6,
+    "Texto": "¡Al final sí que servía para algo!",
+    "Id": "117221469329445"
+  }
+]

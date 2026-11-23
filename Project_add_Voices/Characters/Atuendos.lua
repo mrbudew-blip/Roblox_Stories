@@ -12,21 +12,26 @@
 	  Caras predefinidas : Timido, Seguro, Alegre, Neutral, Serio
 	  Ojos   : tabla { Iris = Color3, Parpado = 0..0.6, ParpadoInferior = 0..0.4, Tamano = 1 }
 	           (ojos detallados que parpadean solos)
-	  Cejas  : Normales, Gruesas, Preocupadas, Arqueadas, Ninguna
-	  Boca   : Sonrisa, SonrisaPequena, SonrisaAbierta, MediaSonrisa, Seria, O
+	  Cejas  : Normales, Gruesas, Preocupadas, Arqueadas, Levantadas, Enfadadas, Ninguna
+	  Boca   : Sonrisa, SonrisaPequena, SonrisaAbierta, MediaSonrisa, Seria, Triste, O
 	           (al hablar se cambia por una boca que se abre y se cierra)
 
 	Pelo (Pelo = { Estilo = "...", Color = Color3 })
-	  Corto, Despeinado, Rapado, Ninguno
+	  Corto, Despeinado, Rapado, Raya (peinado de lado con patillas), Entradas (pelo en retirada), Ninguno
+
+	Expresiones (acción "Expresion" de las escenas; cambian cejas, boca y párpados un rato)
+	  Sorpresa, Frustracion, Idea, Feliz, Curiosidad, Orgullo, Pensativo, Duda
 
 	Prendas superiores (Superior = { Prenda = "...", Color = Color3, ColorDetalle = Color3 })
-	  Camiseta, MangaLarga, Sudadera, Polo, Tirantes, Chaqueta, CamisetaRayas
+	  Camiseta, MangaLarga, Sudadera, Polo, Tirantes, Chaqueta, CamisetaRayas,
+	  Camisa, Bata (bata de laboratorio; ColorDetalle = camisa), ChalecoCamisa (ColorDetalle = camisa)
 
 	Prendas inferiores (Inferior = { Prenda = "...", Color = Color3 })
 	  Pantalon, Corto
 
 	Accesorios (Accesorios = { { Tipo = "...", Color = Color3 }, ... })
-	  Gorra, GorraAtras, Gafas, Barba, Cinturon, Barriga, Mochila
+	  Gorra, GorraAtras, Gafas (montura dibujada en la cara), GafasSol, Barba, Bigote,
+	  Corbata, Cinturon, Barriga, Mochila
 ]]
 
 local Atuendos = {}
@@ -127,6 +132,29 @@ Atuendos.Caras = {
 		Cejas = "Gruesas",
 		Boca = "Seria",
 	},
+	Entusiasta = {
+		Ojos = { Iris = Color3.fromRGB(105, 120, 60), Parpado = 0.02, Tamano = 1.05 },
+		Cejas = "Arqueadas",
+		Boca = "Sonrisa",
+	},
+	Curioso = {
+		Ojos = { Iris = Color3.fromRGB(70, 120, 170), Parpado = 0.14 },
+		Cejas = "Normales",
+		Boca = "SonrisaPequena",
+	},
+}
+
+-- Expresiones temporales: se superponen a la cara base (ver Atuendos.Expresar).
+-- Parpado = cuánto baja el párpado superior (0 = ojos muy abiertos).
+Atuendos.Expresiones = {
+	Sorpresa = { Cejas = "Levantadas", Boca = "O", Parpado = 0 },
+	Frustracion = { Cejas = "Enfadadas", Boca = "Triste", Parpado = 0.3 },
+	Idea = { Cejas = "Levantadas", Boca = "Sonrisa", Parpado = 0 },
+	Feliz = { Cejas = "Arqueadas", Boca = "SonrisaAbierta" },
+	Curiosidad = { Cejas = "Preocupadas", Boca = "Seria", Parpado = 0.08 },
+	Duda = { Cejas = "Preocupadas", Boca = "MediaSonrisa", Parpado = 0.2 },
+	Orgullo = { Cejas = "Normales", Boca = "MediaSonrisa", Parpado = 0.3 },
+	Pensativo = { Cejas = "Gruesas", Boca = "Seria", Parpado = 0.28 },
 }
 
 -- Rectángulo (o pastilla/círculo si redondo) centrado en "x, y" (escala 0-1 del padre).
@@ -230,6 +258,7 @@ local function ojo(g, nombre, x, y, op, piel, haciaDentro)
 	p.BorderSizePixel = 0
 	p.ZIndex = 6
 	p:SetAttribute("Alto", alto)
+	p:SetAttribute("AltoBase", alto)
 	p.Parent = cont
 
 	local pestanas = forma(p, 0.5, 1, 0.86, 0, PESTANAS, true, 0, 0, 7)
@@ -248,6 +277,8 @@ local CEJAS = {
 	Gruesas = { Giro = 7, Y = 0.28, Grosor = 0.06 },
 	Preocupadas = { Giro = -16, Y = 0.25, Grosor = 0.035 },
 	Arqueadas = { Giro = -9, Y = 0.22, Grosor = 0.04 },
+	Levantadas = { Giro = -4, Y = 0.18, Grosor = 0.04 },
+	Enfadadas = { Giro = 18, Y = 0.29, Grosor = 0.05 },
 }
 
 local BOCAS = {
@@ -268,6 +299,9 @@ local BOCAS = {
 	end,
 	Seria = function(g, y)
 		forma(g, 0.5, y, 0.22, 0.03, OSCURO, true)
+	end,
+	Triste = function(g, y)
+		arco(g, 0.5, y + 0.04, 0.22, 0.1, false, OSCURO, 3)
 	end,
 	O = function(g, y)
 		forma(g, 0.5, y, 0.1, 0.13, Color3.fromRGB(90, 25, 30), true)
@@ -291,6 +325,17 @@ local function bocaHabla(g, y)
 	local lengua = forma(b, 0.5, 1.15, 0.6, 0.5, Color3.fromRGB(220, 90, 100), true, 0, 0, 2)
 	lengua.AnchorPoint = Vector2.new(0.5, 1)
 	return b
+end
+
+-- Contenedor transparente a pantalla completa de la cara (agrupa piezas).
+local function capa(padre, nombre, visible)
+	local f = Instance.new("Frame")
+	f.Name = nombre
+	f.Size = UDim2.fromScale(1, 1)
+	f.BackgroundTransparency = 1
+	f.Visible = visible ~= false
+	f.Parent = padre
+	return f
 end
 
 function Atuendos.CrearCara(cabeza, def)
@@ -320,19 +365,20 @@ function Atuendos.CrearCara(cabeza, def)
 	ojo(g, "OjoIzq", 0.33, 0.45, ojos, piel, 1)
 	ojo(g, "OjoDer", 0.67, 0.45, ojos, piel, -1)
 
-	local ceja = CEJAS[def.Cejas or "Normales"]
-	if ceja then
-		forma(g, 0.33, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, ceja.Giro)
-		forma(g, 0.67, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, -ceja.Giro)
+	local cejasBase = def.Cejas or "Normales"
+	for nombre, ceja in pairs(CEJAS) do
+		local grupo = capa(g, "Cejas_" .. nombre, nombre == cejasBase)
+		forma(grupo, 0.33, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, ceja.Giro)
+		forma(grupo, 0.67, ceja.Y, 0.17, ceja.Grosor, OSCURO, true, -ceja.Giro)
 	end
+	g:SetAttribute("CejasBase", cejasBase)
 
-	local reposo = Instance.new("Frame")
-	reposo.Name = "BocaReposo"
-	reposo.Size = UDim2.fromScale(1, 1)
-	reposo.BackgroundTransparency = 1
-	reposo.Parent = g
-	local boca = BOCAS[def.Boca or "SonrisaPequena"] or BOCAS.SonrisaPequena
-	boca(reposo, 0.69)
+	local reposo = capa(g, "BocaReposo", true)
+	local bocaBase = BOCAS[def.Boca or ""] and def.Boca or "SonrisaPequena"
+	for nombre, dibujar in pairs(BOCAS) do
+		dibujar(capa(reposo, "Boca_" .. nombre, nombre == bocaBase), 0.69)
+	end
+	g:SetAttribute("BocaBase", bocaBase)
 	bocaHabla(g, 0.71)
 
 	if def.Mejillas then
@@ -350,6 +396,52 @@ function Atuendos.CrearCara(cabeza, def)
 
 	g.Parent = cabeza
 	return g
+end
+
+--[[
+	Aplica una expresión a una cara creada por CrearCara (nil = vuelve a la cara base).
+	expresion = nombre de Atuendos.Expresiones o tabla { Cejas, Boca, Parpado }.
+	Devuelve la altura de párpado que hay que usar (la anima el Actor).
+]]
+function Atuendos.Expresar(cara, expresion)
+	if type(expresion) == "string" then
+		expresion = Atuendos.Expresiones[expresion]
+	end
+	expresion = expresion or {}
+	local cejas = expresion.Cejas or cara:GetAttribute("CejasBase")
+	local boca = expresion.Boca or cara:GetAttribute("BocaBase")
+	for _, hijo in ipairs(cara:GetChildren()) do
+		if hijo.Name:sub(1, 6) == "Cejas_" then
+			hijo.Visible = hijo.Name == "Cejas_" .. tostring(cejas)
+		end
+	end
+	local reposo = cara:FindFirstChild("BocaReposo")
+	if reposo then
+		for _, hijo in ipairs(reposo:GetChildren()) do
+			hijo.Visible = hijo.Name == "Boca_" .. tostring(boca)
+		end
+	end
+	return expresion.Parpado
+end
+
+-- Montura de gafas dibujada sobre la cara (no tapa los ojos ni el parpadeo).
+function Atuendos.GafasCara(cara, color)
+	color = color or OSCURO
+	local grupo = capa(cara, "Gafas", true)
+	grupo.ZIndex = 10
+	for _, x in ipairs({ 0.33, 0.67 }) do
+		local lente = forma(grupo, x, 0.45, 0.27, 0.26, Color3.fromRGB(200, 225, 240), false, 0, 0.88, 20)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0.3, 0)
+		c.Parent = lente
+		local borde = Instance.new("UIStroke")
+		borde.Color = color
+		borde.Thickness = 3.5
+		borde.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		borde.Parent = lente
+	end
+	forma(grupo, 0.5, 0.42, 0.08, 0.03, color, false, 0, 0, 20)
+	return grupo
 end
 
 --==============================================================================
@@ -429,7 +521,7 @@ PIEZAS.GorraAtras = function(m, color, detalle)
 	PIEZAS.Gorra(m, color, detalle, true)
 end
 
-PIEZAS.Gafas = function(m, color)
+PIEZAS.GafasSol = function(m, color)
 	local h = m.Head
 	local s = h.Size
 	for _, lado in ipairs({ -1, 1 }) do
@@ -443,6 +535,97 @@ PIEZAS.Barba = function(m, color)
 	local s = h.Size
 	pegar(m, h, "Barba", Vector3.new(s.X * 0.86, s.Y * 0.26, s.Z * 0.2), C(0, -s.Y * 0.38, -s.Z * 0.42), color)
 	pegar(m, h, "Patilla", Vector3.new(s.X * 1.02, s.Y * 0.35, s.Z * 0.3), C(0, -s.Y * 0.2, -s.Z * 0.15), color)
+end
+
+PIEZAS.PeloRaya = function(m, color)
+	PIEZAS.PeloCorto(m, color)
+	local h = m.Head
+	local s = h.Size
+	-- Volumen peinado hacia un lado, flequillo lateral y patillas (estilo años 70)
+	pegar(m, h, "Tupe", Vector3.new(s.X * 0.8, s.Y * 0.18, s.Z * 0.92), C(s.X * 0.1, s.Y * 0.55, -s.Z * 0.03) * CFrame.Angles(0, 0, math.rad(-6)), color)
+	pegar(m, h, "FlequilloLateral", Vector3.new(s.X * 0.62, s.Y * 0.14, s.Z * 0.16), C(s.X * 0.17, s.Y * 0.39, -s.Z * 0.5) * CFrame.Angles(0, 0, math.rad(-12)), color)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, h, "Patilla", Vector3.new(s.X * 0.08, s.Y * 0.36, s.Z * 0.3), C(lado * s.X * 0.52, s.Y * 0.04, -s.Z * 0.05), color)
+	end
+end
+
+PIEZAS.PeloEntradas = function(m, color)
+	local h = m.Head
+	local s = h.Size
+	-- Coronilla y nuca con pelo; la frente queda despejada
+	pegar(m, h, "Pelo", Vector3.new(s.X * 1.04, s.Y * 0.16, s.Z * 0.62), C(0, s.Y * 0.45, s.Z * 0.22), color)
+	pegar(m, h, "Pelo", Vector3.new(s.X * 1.04, s.Y * 0.6, s.Z * 0.18), C(0, s.Y * 0.15, s.Z * 0.46), color)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, h, "Sien", Vector3.new(s.X * 0.1, s.Y * 0.42, s.Z * 0.62), C(lado * s.X * 0.52, s.Y * 0.14, s.Z * 0.16), color)
+		pegar(m, h, "Patilla", Vector3.new(s.X * 0.08, s.Y * 0.3, s.Z * 0.22), C(lado * s.X * 0.52, -s.Y * 0.05, -s.Z * 0.12), color)
+	end
+end
+
+PIEZAS.Bigote = function(m, color)
+	local h = m.Head
+	local s = h.Size
+	pegar(m, h, "Bigote", Vector3.new(s.X * 0.42, s.Y * 0.09, s.Z * 0.12), C(0, -s.Y * 0.1, -s.Z * 0.49), color)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, h, "BigotePunta", Vector3.new(s.X * 0.1, s.Y * 0.11, s.Z * 0.1), C(lado * s.X * 0.22, -s.Y * 0.15, -s.Z * 0.48), color)
+	end
+end
+
+PIEZAS.Corbata = function(m, color)
+	local t = m.UpperTorso
+	local s = t.Size
+	pegar(m, t, "CorbataNudo", Vector3.new(s.X * 0.12, s.Y * 0.11, 0.08), C(0, s.Y * 0.4, -s.Z * 0.55), color)
+	pegar(m, t, "CorbataPala", Vector3.new(s.X * 0.13, s.Y * 0.62, 0.05), C(0, s.Y * 0.02, -s.Z * 0.54), color)
+end
+
+-- Bata de laboratorio: solapas, faldón hasta las rodillas y bolsillo con bolígrafos
+PIEZAS.Solapas = function(m, color)
+	local t = m.UpperTorso
+	local s = t.Size
+	local tono = color:Lerp(Color3.new(0, 0, 0), 0.1)
+	for _, lado in ipairs({ -1, 1 }) do
+		pegar(m, t, "Solapa", Vector3.new(s.X * 0.16, s.Y * 0.5, 0.07), C(lado * s.X * 0.2, s.Y * 0.2, -s.Z * 0.53) * CFrame.Angles(0, 0, math.rad(lado * 18)), tono)
+	end
+end
+
+PIEZAS.Faldon = function(m, color)
+	local t = m.LowerTorso
+	local s = t.Size
+	local pierna = m:FindFirstChild("RightUpperLeg")
+	local largo = (pierna and pierna.Size.Y or 1.2) * 1.05
+	pegar(m, t, "Faldon", Vector3.new(s.X * 1.1, largo, s.Z * 1.15), C(0, -s.Y * 0.3 - largo / 2, 0), color)
+	pegar(m, t, "FaldonAbertura", Vector3.new(0.06, largo, 0.04), C(0, -s.Y * 0.3 - largo / 2, -s.Z * 0.59), color:Lerp(Color3.new(0, 0, 0), 0.25))
+end
+
+PIEZAS.BolsilloBata = function(m, color)
+	local t = m.UpperTorso
+	local s = t.Size
+	local tono = color:Lerp(Color3.new(0, 0, 0), 0.08)
+	pegar(m, t, "Bolsillo", Vector3.new(s.X * 0.22, s.Y * 0.2, 0.05), C(-s.X * 0.28, -s.Y * 0.02, -s.Z * 0.53), tono)
+	pegar(m, t, "Boligrafo", Vector3.new(0.06, s.Y * 0.2, 0.06), C(-s.X * 0.32, s.Y * 0.12, -s.Z * 0.54), Color3.fromRGB(40, 70, 170))
+	pegar(m, t, "Boligrafo", Vector3.new(0.06, s.Y * 0.18, 0.06), C(-s.X * 0.25, s.Y * 0.11, -s.Z * 0.54), Color3.fromRGB(190, 40, 40))
+end
+
+PIEZAS.Botones = function(m)
+	local t = m.UpperTorso
+	local s = t.Size
+	for i, y in ipairs({ 0.25, 0.0, -0.25 }) do
+		pegar(m, t, "Boton" .. i, Vector3.new(0.08, 0.08, 0.04), C(0, s.Y * y, -s.Z * 0.52), Color3.fromRGB(235, 235, 230))
+	end
+end
+
+-- Cuello de camisa con el color de detalle (debajo de un chaleco)
+PIEZAS.CuelloCamisa = function(m, _, detalle)
+	local t = m.UpperTorso
+	local s = t.Size
+	pegar(m, t, "Cuello", Vector3.new(s.X * 0.55, s.Y * 0.08, s.Z * 1.04), C(0, s.Y * 0.47, 0), detalle or BLANCO)
+end
+
+-- Escote en pico del chaleco (deja ver la camisa)
+PIEZAS.PicoChaleco = function(m, _, detalle)
+	local t = m.UpperTorso
+	local s = t.Size
+	local lado = s.X * 0.26
+	pegar(m, t, "Pico", Vector3.new(lado, lado, 0.04), C(0, s.Y * 0.45, -s.Z * 0.51) * CFrame.Angles(0, 0, math.rad(45)), detalle or BLANCO)
 end
 
 PIEZAS.Capucha = function(m, color)
@@ -503,6 +686,9 @@ Atuendos.Superiores = {
 	Tirantes = { Brazos = "Ninguno" },
 	Chaqueta = { Brazos = "Completo", Extras = { "Abertura" } }, -- ColorDetalle = camiseta de debajo
 	CamisetaRayas = { Brazos = "Superior", Extras = { "Rayas" } }, -- ColorDetalle = color de las rayas
+	Camisa = { Brazos = "Completo", Extras = { "Cuello", "Botones" } },
+	Bata = { Brazos = "Completo", Extras = { "Abertura", "Solapas", "Faldon", "BolsilloBata" } }, -- ColorDetalle = camisa
+	ChalecoCamisa = { Brazos = "Completo", BrazosDetalle = true, Extras = { "CuelloCamisa", "PicoChaleco" } }, -- ColorDetalle = camisa
 }
 
 -- Piernas: "Superior" (pantalón corto) o "Completo"
@@ -563,11 +749,12 @@ function Atuendos.Vestir(modelo, def)
 	local prendaSup = Atuendos.Superiores[sup.Prenda or "Camiseta"] or Atuendos.Superiores.Camiseta
 	local colorSup = sup.Color or Color3.fromRGB(13, 105, 172)
 	colorear(modelo, { "UpperTorso" }, colorSup)
+	local colorBrazos = (prendaSup.BrazosDetalle and sup.ColorDetalle) or colorSup
 	if prendaSup.Brazos ~= "Ninguno" then
-		colorear(modelo, { "LeftUpperArm", "RightUpperArm" }, colorSup)
+		colorear(modelo, { "LeftUpperArm", "RightUpperArm" }, colorBrazos)
 	end
 	if prendaSup.Brazos == "Completo" then
-		colorear(modelo, { "LeftLowerArm", "RightLowerArm" }, colorSup)
+		colorear(modelo, { "LeftLowerArm", "RightLowerArm" }, colorBrazos)
 	end
 
 	-- Parte de abajo
@@ -592,18 +779,27 @@ function Atuendos.Vestir(modelo, def)
 		pieza(modelo, "Pelo" .. def.Pelo.Estilo, def.Pelo.Color or OSCURO)
 	end
 
-	-- Accesorios
+	-- Cara
+	local cara = nil
+	if def.Cara and type(def.Cara) ~= "number" and modelo:FindFirstChild("Head") then
+		cara = Atuendos.CrearCara(modelo.Head, def.Cara)
+	end
+
+	-- Accesorios (las gafas normales se dibujan sobre la cara)
 	for _, acc in ipairs(def.Accesorios or {}) do
 		local color = acc.Color
 		if acc.Tipo == "Barriga" then
 			color = color or colorSup
 		end
-		pieza(modelo, acc.Tipo, color or OSCURO, acc.ColorDetalle)
-	end
-
-	-- Cara
-	if def.Cara and type(def.Cara) ~= "number" and modelo:FindFirstChild("Head") then
-		Atuendos.CrearCara(modelo.Head, def.Cara)
+		if acc.Tipo == "Gafas" then
+			if cara then
+				Atuendos.GafasCara(cara, color)
+			else
+				pieza(modelo, "GafasSol", color or OSCURO)
+			end
+		else
+			pieza(modelo, acc.Tipo, color or OSCURO, acc.ColorDetalle)
+		end
 	end
 end
 

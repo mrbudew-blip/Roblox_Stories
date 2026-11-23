@@ -12,13 +12,14 @@
 	  Cuerpo       → { Altura, Anchura, Profundidad, Cabeza }  (1 = normal)
 	  Cara         → nombre de Atuendos.Caras, tabla { Ojos, Cejas, Boca, Mejillas, Pecas }
 	                 o id numérico de una cara del catálogo
-	  Pelo         → { Estilo = "Corto" | "Despeinado" | "Rapado" | "Ninguno", Color }
+	  Pelo         → { Estilo = "Corto" | "Despeinado" | "Rapado" | "Raya" | "Entradas" | "Ninguno", Color }
 	  Superior     → { Prenda = "Camiseta" | "MangaLarga" | "Sudadera" | "Polo" | "Tirantes"
-	                            | "Chaqueta" | "CamisetaRayas", Color, ColorDetalle }
+	                            | "Chaqueta" | "CamisetaRayas" | "Camisa" | "Bata"
+	                            | "ChalecoCamisa", Color, ColorDetalle }
 	  Inferior     → { Prenda = "Pantalon" | "Corto", Color }
 	  Calzado      → Color3
-	  Accesorios   → lista de { Tipo = "Gorra" | "GorraAtras" | "Gafas" | "Barba" | "Cinturon"
-	                                  | "Barriga" | "Mochila", Color }
+	  Accesorios   → lista de { Tipo = "Gorra" | "GorraAtras" | "Gafas" | "GafasSol" | "Barba"
+	                                  | "Bigote" | "Corbata" | "Cinturon" | "Barriga" | "Mochila", Color }
 
 	Las prendas son básicas a propósito (sudadera, camiseta, pantalón largo, gorra)
 	para que sirvan en casi cualquier historia: casa, calle, colegio, trabajo...
@@ -75,6 +76,45 @@ return {
 		Accesorios = {
 			{ Tipo = "GorraAtras", Color = rgb(196, 40, 28) },
 			{ Tipo = "Barriga" },
+		},
+	},
+
+	--==========================================================================
+	-- HISTORIA: EL ORIGEN DEL POST-IT
+	--==========================================================================
+
+	-- Spencer: químico joven y entusiasta, orgulloso de su "pegamento raro".
+	-- Bata blanca de laboratorio sobre camisa azul clara, corbata granate,
+	-- gafas de pasta negras y pelo castaño peinado de lado (años 70).
+	Spencer = {
+		Personalidad = "Químico entusiasta y optimista, orgulloso de su invento",
+		Piel = rgb(240, 208, 185),
+		Cuerpo = { Altura = 1.0, Anchura = 0.85, Profundidad = 0.85, Cabeza = 1 },
+		Cara = "Entusiasta",
+		Pelo = { Estilo = "Raya", Color = rgb(72, 48, 32) },
+		Superior = { Prenda = "Bata", Color = rgb(246, 246, 242), ColorDetalle = rgb(150, 185, 215) },
+		Inferior = { Prenda = "Pantalon", Color = rgb(72, 74, 82) },
+		Calzado = rgb(40, 32, 28),
+		Accesorios = {
+			{ Tipo = "Gafas", Color = rgb(25, 22, 22) },
+			{ Tipo = "Corbata", Color = rgb(125, 35, 40) },
+		},
+	},
+
+	-- Art: ingeniero curioso y práctico que canta en el coro (narrador).
+	-- Algo mayor: entradas canosas y bigote. Chaleco mostaza sobre camisa crema
+	-- y pantalón de pana marrón, muy de los años 70.
+	Art = {
+		Personalidad = "Ingeniero curioso y práctico; canta en el coro",
+		Piel = rgb(232, 196, 170),
+		Cuerpo = { Altura = 1.06, Anchura = 1.0, Profundidad = 1.0, Cabeza = 1 },
+		Cara = "Curioso",
+		Pelo = { Estilo = "Entradas", Color = rgb(128, 108, 88) },
+		Superior = { Prenda = "ChalecoCamisa", Color = rgb(184, 128, 46), ColorDetalle = rgb(245, 238, 220) },
+		Inferior = { Prenda = "Pantalon", Color = rgb(110, 74, 45) },
+		Calzado = rgb(62, 40, 26),
+		Accesorios = {
+			{ Tipo = "Bigote", Color = rgb(112, 88, 64) },
 		},
 	},
 }

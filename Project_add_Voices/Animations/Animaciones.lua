@@ -166,6 +166,115 @@ Animaciones.Gestos = {
 			{ RightShoulder = { 40, 0, -10 }, RightElbow = { 125, 0, 0 }, Neck = { 8, 10, 0 } },
 		},
 	},
+	-- Brazo estirado hacia delante y arriba: pegar o despegar algo de una pared
+	Pegar = {
+		Transicion = 0.3,
+		Duracion = 0.9,
+		Fotogramas = {
+			{ RightShoulder = { 105, 0, 0 }, RightElbow = { 10, 0, 0 }, Neck = { 8, 0, 0 } },
+		},
+	},
+
+	-- Alcanzar algo de una mesa (de pie o sentado)
+	AlcanzarMesa = {
+		Transicion = 0.3,
+		Duracion = 0.8,
+		Fotogramas = {
+			{ RightShoulder = { 55, 0, 0 }, RightElbow = { 25, 0, 0 }, Waist = { -12, 0, 0 }, Neck = { -15, 0, 0 } },
+		},
+	},
+
+	-- Enseñar un objeto que lleva en la mano (a la altura de la cara)
+	Mostrar = {
+		Transicion = 0.3,
+		Duracion = 1.5,
+		Fotogramas = {
+			{ RightShoulder = { 80, 0, 12 }, RightElbow = { 70, 0, 0 }, Neck = { -4, 0, 0 } },
+		},
+	},
+
+	-- Mirar con atención algo que tiene en la mano
+	Examinar = {
+		Transicion = 0.35,
+		Duracion = 1.5,
+		Fotogramas = {
+			{ RightShoulder = { 65, 0, -8 }, RightElbow = { 85, 0, 0 }, Neck = { -10, 0, 8 } },
+		},
+	},
+
+	-- ¡Idea! Dedo índice arriba junto a la cara
+	Idea = {
+		Transicion = 0.18,
+		Duracion = 1.4,
+		Fotogramas = {
+			{ RightShoulder = { 70, 0, 20 }, RightElbow = { 100, 0, 0 }, Neck = { 10, 0, 0 }, Waist = { 4, 0, 0 } },
+		},
+	},
+
+	-- Encogerse de hombros, palmas hacia arriba
+	Encogerse = {
+		Transicion = 0.25,
+		Duracion = 1,
+		Fotogramas = {
+			{
+				RightShoulder = { 20, 0, 35 },
+				LeftShoulder = { 20, 0, -35 },
+				RightElbow = { 80, 0, 0 },
+				LeftElbow = { 80, 0, 0 },
+				Neck = { 0, 0, 8 },
+			},
+		},
+	},
+
+	-- Cabeza y torso hacia abajo (mirar al suelo)
+	MirarAbajo = {
+		Transicion = 0.35,
+		Duracion = 1.2,
+		Fotogramas = {
+			{ Neck = { -30, 0, 0 }, Waist = { -10, 0, 0 } },
+		},
+	},
+
+	-- Lamentarse: mano izquierda a la frente, cabeza baja
+	Lamentarse = {
+		Transicion = 0.3,
+		Duracion = 1.2,
+		Fotogramas = {
+			{ LeftShoulder = { 100, 0, -15 }, LeftElbow = { 115, 0, 0 }, Neck = { -18, 0, 0 } },
+		},
+	},
+
+	-- Celebrar con el brazo derecho en alto
+	BrazoArriba = {
+		Transicion = 0.22,
+		Duracion = 1.2,
+		Fotogramas = {
+			{ RightShoulder = { 160, 0, 10 }, RightElbow = { 10, 0, 0 }, Neck = { 8, 0, 0 } },
+		},
+	},
+
+	-- Untar pegamento con un pincel (bucle)
+	Untar = {
+		Bucle = true,
+		Transicion = 0.22,
+		Duracion = 2,
+		Fotogramas = {
+			{ RightShoulder = { 50, 0, -5 }, RightElbow = { 40, 0, 0 }, Waist = { -10, 0, 0 }, Neck = { -18, 0, 0 } },
+			{ RightShoulder = { 45, 0, 12 }, RightElbow = { 52, 0, 0 }, Waist = { -10, 0, 0 }, Neck = { -18, 0, 0 } },
+		},
+	},
+}
+
+-- 4) POSTURAS DE PIERNAS --------------------------------------------------------
+-- Se mantienen debajo de cualquier gesto (acción "Sentar" / "Levantar").
+-- Articulaciones: RightHip, LeftHip (X+ = muslo hacia delante), RightKnee, LeftKnee (X- = dobla la rodilla).
+Animaciones.Piernas = {
+	Sentado = {
+		RightHip = { 90, 0, 0 },
+		LeftHip = { 90, 0, 0 },
+		RightKnee = { -90, 0, 0 },
+		LeftKnee = { -90, 0, 0 },
+	},
 }
 
 return Animaciones
