@@ -73,6 +73,7 @@ local function puntosActor(actor, encuadre, derecha, lista)
 		abajo = raiz.Y - 0.5
 		ancho = 1.1
 	end
+	ancho = ancho * (actor.EscalaAncho or 1)
 	local base = Vector3.new(raiz.X, 0, raiz.Z)
 	for _, y in ipairs({ arriba, abajo }) do
 		for _, s in ipairs({ -1, 1 }) do

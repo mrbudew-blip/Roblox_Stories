@@ -113,6 +113,9 @@ function Actor.new(modelo, rol)
 	end
 	self.AlturaCabeza = alturaCabeza
 	self.TamanoCabeza = cabeza and cabeza.Size.Y or 1.2
+	-- Anchura relativa al R15 estándar (torso de 2 studs): la usan las cámaras
+	local torso = modelo:FindFirstChild("UpperTorso")
+	self.EscalaAncho = torso and math.max(torso.Size.X / 2, 0.5) or 1
 
 	-- Animaciones
 	local animator = humanoid:FindFirstChildOfClass("Animator")
@@ -132,7 +135,96 @@ function Actor.new(modelo, rol)
 	end
 
 	self:Base("Quieto")
+	self:_iniciarCara()
 	return self
+end
+
+-- CARA: PARPADEO Y BOCA --------------------------------------------------------
+-- Funciona con las caras creadas por Atuendos (SurfaceGui "Cara" en la cabeza).
+
+local azar = Random.new()
+
+function Actor:_iniciarCara()
+	local cabeza = self.Modelo:FindFirstChild("Head")
+	local cara = cabeza and cabeza:FindFirstChild("Cara")
+	if not cara then
+		return
+	end
+	self.Cara = cara
+	self.TokenBoca = 0
+	self.Parpados = {}
+	for _, nombre in ipairs({ "OjoIzq", "OjoDer" }) do
+		local ojo = cara:FindFirstChild(nombre)
+		local parpado = ojo and ojo:FindFirstChild("Parpado")
+		if parpado then
+			table.insert(self.Parpados, parpado)
+		end
+	end
+	if #self.Parpados == 0 then
+		return
+	end
+	-- Parpadeo automático cada 2-5 s (a veces doble). Termina al destruir el modelo.
+	task.spawn(function()
+		task.wait(azar:NextNumber(0.3, 2))
+		while cara.Parent do
+			self:Parpadear()
+			if azar:NextNumber() < 0.15 then
+				task.wait(0.28)
+				self:Parpadear()
+			end
+			task.wait(azar:NextNumber(2, 5))
+		end
+	end)
+end
+
+function Actor:Parpadear()
+	for _, parpado in ipairs(self.Parpados or {}) do
+		local abierto = UDim2.fromScale(1.2, parpado:GetAttribute("Alto") or 0.06)
+		local cierra = TweenService:Create(parpado, TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+			Size = UDim2.fromScale(1.2, 1.05),
+		})
+		cierra.Completed:Connect(function()
+			task.wait(0.04)
+			TweenService:Create(parpado, TweenInfo.new(0.1, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+				Size = abierto,
+			}):Play()
+		end)
+		cierra:Play()
+	end
+end
+
+-- Abre y cierra la boca durante "duracion" segundos (no bloquea).
+function Actor:MoverBoca(duracion)
+	local cara = self.Cara
+	local reposo = cara and cara:FindFirstChild("BocaReposo")
+	local habla = cara and cara:FindFirstChild("BocaHabla")
+	if not reposo or not habla then
+		return 0
+	end
+	self.TokenBoca = self.TokenBoca + 1
+	local token = self.TokenBoca
+	task.spawn(function()
+		local fin = os.clock() + duracion
+		while os.clock() < fin and self.TokenBoca == token and cara.Parent do
+			local abre = azar:NextNumber()
+			if abre < 0.25 then
+				reposo.Visible = true
+				habla.Visible = false
+			else
+				reposo.Visible = false
+				habla.Visible = true
+				TweenService:Create(habla, TweenInfo.new(0.06), {
+					Size = UDim2.fromScale(0.13 + 0.09 * abre, 0.03 + 0.13 * abre),
+				}):Play()
+			end
+			task.wait(azar:NextNumber(0.09, 0.18))
+		end
+		if self.TokenBoca == token then
+			reposo.Visible = true
+			habla.Visible = false
+		end
+	end)
+	return duracion
 end
 
 -- POSICIÓN ---------------------------------------------------------------------

@@ -15,11 +15,13 @@ const ENTRADAS = [
   ["Cameras/Camaras.lua", "StoryTemplate/Modulos", "Camaras", "ModuleScript"],
   ["Cameras/Guias.lua", "StoryTemplate/Modulos", "Guias", "ModuleScript"],
   ["Characters/DefPersonajes.lua", "StoryTemplate/Modulos", "DefPersonajes", "ModuleScript"],
+  ["Characters/Atuendos.lua", "StoryTemplate/Modulos", "Atuendos", "ModuleScript"],
   ["Characters/FabricaPersonajes.lua", "StoryTemplate/Modulos", "FabricaPersonajes", "ModuleScript"],
   ["Enviroments/ConstructorEntornos.lua", "StoryTemplate/Herramientas", "ConstructorEntornos", "ModuleScript"],
   ["Props/ConstructorObjetos.lua", "StoryTemplate/Herramientas", "ConstructorObjetos", "ModuleScript"],
   ["Scenes/_PlantillaEscena.lua", "StoryTemplate/Escenas", "_PlantillaEscena", "ModuleScript"],
   ["Scenes/Prueba_Plantilla.lua", "StoryTemplate/Escenas", "Prueba_Plantilla", "ModuleScript"],
+  ["Scenes/Prueba_Caras.lua", "StoryTemplate/Escenas", "Prueba_Caras", "ModuleScript"],
   ["Scripts/StoryRunner.client.lua", "StarterPlayerScripts", "StoryRunner", "LocalScript"],
   ["Scripts/StoryServer.server.lua", "ServerScriptService", "StoryServer", "Script"],
 ];

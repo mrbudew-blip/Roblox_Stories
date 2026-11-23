@@ -504,7 +504,12 @@ Acciones.Hablar = function(ctx, p)
 			duracion = duracion or ctx:Duracion(s)
 		end
 	end
-	return actor:Gesto("Hablar", duracion or 2)
+	duracion = duracion or 2
+	actor:MoverBoca(duracion)
+	if p.SoloBoca then
+		return duracion
+	end
+	return actor:Gesto("Hablar", duracion)
 end
 
 Acciones.Senalar = function(ctx, p)

@@ -18,7 +18,7 @@
 	  Caminar    { Accion = "Caminar", Actor = "Protagonista", Hasta = "Pos_B", Desde = "Entrada_Izq", MirarA = "Secundario1" }
 	  Correr     { Accion = "Correr",  Actor = "Protagonista", Hasta = "Secundario1", Distancia = 3 }
 	  Mirar      { Accion = "Mirar", Actor = "Protagonista", A = "Secundario1", SoloCabeza = false }
-	  Hablar     { Accion = "Hablar", Actor = "Protagonista", Duracion = 3 }   (o Sonido = "Voz1")
+	  Hablar     { Accion = "Hablar", Actor = "Protagonista", Duracion = 3 }   (o Sonido = "Voz1"; SoloBoca = true sin gestos)
 	  Senalar    { Accion = "Senalar", Actor = "Protagonista", A = "Obj_1" }
 	  Sorpresa   { Accion = "Sorpresa", Actor = "Secundario1" }
 	  Gesto      { Accion = "Gesto", Actor = "Protagonista", Gesto = "Pensar", Duracion = 2, Mantener = false }

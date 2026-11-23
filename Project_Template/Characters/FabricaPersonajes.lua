@@ -3,8 +3,9 @@
 	Studio: ReplicatedStorage > StoryTemplate > Modulos > FabricaPersonajes
 
 	Lo usan el instalador (en modo edición) y StoryServer (al pulsar Play, solo
-	si falta algún personaje). Usa Players:CreateHumanoidModelFromDescription,
-	que solo funciona en el servidor o en la barra de comandos de Studio.
+	si falta algún personaje). Usa Players:CreateHumanoidModelFromDescription
+	(cuerpo, piel y escalas) y después el módulo Atuendos (ropa, pelo, cara...).
+	Solo funciona en el servidor o en la barra de comandos de Studio.
 ]]
 
 local Players = game:GetService("Players")
@@ -13,55 +14,74 @@ local Fabrica = {}
 
 local CARA_POR_DEFECTO = "rbxasset://textures/face.png"
 
+-- Se carga al usarse (el módulo Atuendos está junto a este en Modulos)
+local cacheAtuendos = nil
+local function Atuendos()
+	if not cacheAtuendos then
+		cacheAtuendos = require(script.Parent:WaitForChild("Atuendos"))
+	end
+	return cacheAtuendos
+end
+
+-- Escalas del cuerpo. Acepta def.Cuerpo = { Altura, Anchura, Profundidad, Cabeza }
+-- (y, por compatibilidad, def.Altura / def.Anchura / def.Cabeza).
+local function escalas(def)
+	local c = def.Cuerpo or {}
+	return {
+		Altura = c.Altura or def.Altura or 1,
+		Anchura = c.Anchura or def.Anchura or 1,
+		Profundidad = c.Profundidad or c.Anchura or def.Anchura or 1,
+		Cabeza = c.Cabeza or def.Cabeza or 1,
+	}
+end
+
+-- Compatibilidad con el formato antiguo (Camiseta / Brazos / Pantalon)
+local function normalizar(def)
+	local d = {}
+	for k, v in pairs(def) do
+		d[k] = v
+	end
+	if not d.Superior and d.Camiseta then
+		d.Superior = { Prenda = (d.Brazos == d.Camiseta) and "MangaLarga" or "Camiseta", Color = d.Camiseta }
+	end
+	if not d.Inferior and d.Pantalon then
+		d.Inferior = { Prenda = "Pantalon", Color = d.Pantalon }
+	end
+	return d
+end
+
 function Fabrica.Descripcion(def)
 	local d = Instance.new("HumanoidDescription")
 	local piel = def.Piel or Color3.fromRGB(255, 204, 153)
-	local brazos = def.Brazos or piel
-	local piernas = def.Pantalon or Color3.fromRGB(40, 50, 70)
 	d.HeadColor = piel
-	d.TorsoColor = def.Camiseta or Color3.fromRGB(13, 105, 172)
-	d.LeftArmColor = brazos
-	d.RightArmColor = brazos
-	d.LeftLegColor = piernas
-	d.RightLegColor = piernas
+	d.TorsoColor = piel
+	d.LeftArmColor = piel
+	d.RightArmColor = piel
+	d.LeftLegColor = piel
+	d.RightLegColor = piel
 
-	-- Proporciones clásicas
+	-- Proporciones clásicas (bloques) con la complexión de cada personaje
+	local e = escalas(def)
 	d.BodyTypeScale = 0
 	d.ProportionScale = 0
-	d.HeightScale = def.Altura or 1
-	d.WidthScale = def.Anchura or 1
-	d.DepthScale = def.Anchura or 1
-	d.HeadScale = def.Cabeza or 1
+	d.HeightScale = e.Altura
+	d.WidthScale = e.Anchura
+	d.DepthScale = e.Profundidad
+	d.HeadScale = e.Cabeza
 
-	if def.Cara then
-		d.Face = tonumber(def.Cara) or 0
-	end
-	if def.Camisa then
-		d.Shirt = tonumber(def.Camisa) or 0
-	end
-	if def.Pantalones then
-		d.Pants = tonumber(def.Pantalones) or 0
-	end
-	if def.Estampado then
-		d.GraphicTShirt = tonumber(def.Estampado) or 0
-	end
-	if def.Pelo then
-		d.HairAccessory = tostring(def.Pelo)
-	end
-	if def.Sombrero then
-		d.HatAccessory = tostring(def.Sombrero)
-	end
-	if def.Gafas then
-		d.FaceAccessory = tostring(def.Gafas)
+	-- Cara del catálogo (solo si Cara es un número)
+	if type(def.Cara) == "number" then
+		d.Face = def.Cara
 	end
 	return d
 end
 
 function Fabrica.Construir(nombre, def)
+	def = normalizar(def)
 	local modelo = Players:CreateHumanoidModelFromDescription(Fabrica.Descripcion(def), Enum.HumanoidRigType.R15)
 	modelo.Name = nombre
 	for _, d in ipairs(modelo:GetDescendants()) do
-		if d:IsA("LuaSourceContainer") then
+		if d:IsA("LuaSourceContainer") or d:IsA("BodyColors") then
 			d:Destroy()
 		end
 	end
@@ -70,14 +90,21 @@ function Fabrica.Construir(nombre, def)
 		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
 		humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
 	end
-	-- Asegura que la cabeza tenga cara
+
+	-- Ropa, pelo, accesorios y cara (Atuendos)
+	Atuendos().Vestir(modelo, def)
+
+	-- Si no tiene cara propia, pone la cara clásica
 	local cabeza = modelo:FindFirstChild("Head")
-	if cabeza and not cabeza:FindFirstChildOfClass("Decal") then
+	if cabeza and not cabeza:FindFirstChild("Cara") and not cabeza:FindFirstChildOfClass("Decal") then
 		local cara = Instance.new("Decal")
 		cara.Name = "face"
 		cara.Texture = CARA_POR_DEFECTO
 		cara.Face = Enum.NormalId.Front
 		cara.Parent = cabeza
+	end
+	if def.Personalidad then
+		modelo:SetAttribute("Personalidad", def.Personalidad)
 	end
 	local raiz = modelo:FindFirstChild("HumanoidRootPart")
 	if raiz then

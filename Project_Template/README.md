@@ -35,7 +35,8 @@ ReplicatedStorage
    ├─ Config                 ← qué escena se reproduce y ajustes de grabación
    ├─ Escenas                ← UNA escena = UN ModuleScript (aquí trabajas)
    │   ├─ _PlantillaEscena   ← copia esta para empezar una escena
-   │   └─ Prueba_Plantilla   ← prueba técnica
+   │   ├─ Prueba_Plantilla   ← prueba técnica de todo
+   │   └─ Prueba_Caras       ← prueba de caras: parpadeo y boca
    ├─ Personajes             ← Protagonista, Secundario1, Secundario2 (Models R15)
    ├─ Entornos               ← Calle, Habitacion, Exterior, Neutro (Models)
    │   └─ <Entorno>
@@ -44,7 +45,7 @@ ReplicatedStorage
    ├─ Objetos                ← Caja, Sobre, Telefono, Libro, Bolsa
    ├─ Audio                  ← Musica, Narracion, Efecto (Sounds vacíos)
    ├─ Modulos                ← motor: Director, Actor, Animaciones, Camaras, Guias,
-   │                            DefPersonajes, FabricaPersonajes
+   │                            DefPersonajes, Atuendos, FabricaPersonajes
    └─ Herramientas           ← ConstructorEntornos, ConstructorObjetos (solo para regenerar)
 StarterPlayer > StarterPlayerScripts > StoryRunner   ← arranca la escena al pulsar Play
 ServerScriptService > StoryServer                    ← crea personajes que falten
@@ -54,13 +55,13 @@ ServerScriptService > StoryServer                    ← crea personajes que fal
 
 | Carpeta | Contenido | Módulo en Studio |
 |---|---|---|
-| `Characters/` | `DefPersonajes.lua`, `FabricaPersonajes.lua` | Modulos |
+| `Characters/` | `DefPersonajes.lua`, `Atuendos.lua`, `FabricaPersonajes.lua` | Modulos |
 | `Enviroments/` | `ConstructorEntornos.lua` | Herramientas |
 | `Props/` | `ConstructorObjetos.lua` | Herramientas |
 | `Animations/` | `Animaciones.lua` | Modulos |
 | `Cameras/` | `Camaras.lua`, `Guias.lua` | Modulos |
 | `Scripts/` | `Config`, `Director`, `Actor`, `StoryRunner`, `StoryServer`, plantilla del instalador | varios |
-| `Scenes/` | `_PlantillaEscena.lua`, `Prueba_Plantilla.lua` | Escenas |
+| `Scenes/` | `_PlantillaEscena.lua`, `Prueba_Plantilla.lua`, `Prueba_Caras.lua` | Escenas |
 | `Build/` | `InstalarPlantilla.lua` (generado, **no editar**) | — |
 | `Videos/` | grabaciones exportadas (no se suben a git) | — |
 
@@ -73,11 +74,28 @@ Si cambias algún `.lua` del repositorio, ejecuta `node build.js` para regenerar
 Usa estos nombres exactos en las escenas (y para pedirme qué reutilizar).
 
 ### Personajes (`StoryTemplate > Personajes`)
-| Nombre | Aspecto |
+| Nombre | Complexión | Personalidad | Atuendo |
+|---|---|---|---|
+| `Protagonista` | flaco, estatura media, piel clara | curioso, tímido y algo nervioso (ojos grandes azules, cejas preocupadas, pecas) | sudadera azul con capucha, vaqueros, zapatillas blancas, pelo castaño despeinado |
+| `Secundario1` | alto y fuerte, piel negra | seguro, tranquilo y protector (ojos marrones con párpados entornados, media sonrisa) | camiseta blanca, pantalón gris oscuro, cinturón, botas marrones, pelo rapado y barba corta |
+| `Secundario2` | pequeño y gordito, piel amarilla clásica | alegre, glotón y gracioso (ojos verdes sonrientes, boca abierta, mejillas rosadas) | camiseta de rayas azul y blanca, pantalón caqui, zapatillas rojas, gorra roja hacia atrás |
+
+Las prendas son básicas a propósito para que sirvan en casi cualquier contexto. Todo (caras incluidas) está hecho con colores planos y unas pocas piezas: no usa ids del catálogo ni texturas.
+
+**Caras vivas:** los personajes llevan la cabeza clásica de bloques (se sustituye la cabeza dinámica de Roblox, que traía su propia cara animada). Los ojos son detallados (blanco, iris de color, pupila, brillos, pestañas y párpados) y **parpadean solos** cada 2-5 segundos. Al usar la acción `Hablar` la boca **se abre y se cierra**; con `SoloBoca = true` habla sin mover los brazos.
+
+### Atuendos (`Modulos > Atuendos`)
+Piezas reutilizables para vestir personajes en `DefPersonajes`:
+
+| Tipo | Opciones |
 |---|---|
-| `Protagonista` | camiseta azul, pantalón azul marino |
-| `Secundario1` | camiseta roja, pantalón oscuro, piel morena |
-| `Secundario2` | manga larga verde, pantalón marrón, algo más bajo |
+| Caras predefinidas | `Timido`, `Seguro`, `Alegre`, `Neutral`, `Serio` |
+| Ojos (caras a medida) | `{ Iris = Color3, Parpado = 0..0.6, ParpadoInferior = 0..0.4, Tamano = 1 }` — `Parpado` alto = mirada entornada; `ParpadoInferior` = ojos sonrientes |
+| Cejas / Boca | `Normales`, `Gruesas`, `Preocupadas`, `Arqueadas`, `Ninguna` / `Sonrisa`, `SonrisaPequena`, `SonrisaAbierta`, `MediaSonrisa`, `Seria`, `O` (+ `Mejillas`, `Pecas`) |
+| Pelo | `Corto`, `Despeinado`, `Rapado`, `Ninguno` |
+| Prenda superior | `Camiseta`, `MangaLarga`, `Sudadera`, `Polo`, `Tirantes`, `Chaqueta`, `CamisetaRayas` |
+| Prenda inferior | `Pantalon`, `Corto` |
+| Accesorios | `Gorra`, `GorraAtras`, `Gafas`, `Barba`, `Cinturon`, `Barriga`, `Mochila` |
 
 ### Entornos (`StoryTemplate > Entornos`)
 | Nombre | Descripción |
@@ -199,7 +217,7 @@ Donde un paso pide un lugar (`En`, `Hasta`, `Desde`, `A`, `MirarA`) puedes poner
 | `Caminar` | `Actor`, `Hasta`, `Desde`?, `MirarA`?, `Velocidad`?, `Distancia`? | con `Desde` el actor aparece ahí antes de andar |
 | `Correr` | igual que `Caminar` | |
 | `Mirar` | `Actor`, `A`, `SoloCabeza`?, `Tiempo`? | `SoloCabeza = true` y sin `A` → cabeza al frente |
-| `Hablar` | `Actor`, `Duracion`?, `Sonido`?, `Volumen`? | con `Sonido` dura lo que dure el audio |
+| `Hablar` | `Actor`, `Duracion`?, `Sonido`?, `Volumen`?, `SoloBoca`? | mueve la boca y gesticula; con `SoloBoca = true` solo la boca. Con `Sonido` dura lo que dure el audio |
 | `Senalar` | `Actor`, `A`?, `Duracion`?, `Mantener`? | gira hacia `A` y señala |
 | `Sorpresa` | `Actor`, `Duracion`?, `Mantener`? | |
 | `Gesto` | `Actor`, `Gesto`, `Duracion`?, `Mantener`? | cualquier gesto de `Animaciones.Gestos` |
@@ -240,11 +258,13 @@ Consejo: una escena por bloque de narración (10–30 s). Es más fácil de repe
 - Usa Parts con material *SmoothPlastic*, sin texturas, `CanCollide` desactivado y pocas piezas.
 
 ### Nuevo personaje
-- **Por código (recomendado):** añade una entrada en `Modulos > DefPersonajes` (colores, escala y, si quieres, ids de pelo/ropa del catálogo). Pulsa Play: `StoryServer` crea automáticamente los que falten (solo durante esa prueba). Para guardarlo en el lugar, ejecuta en la barra de comandos:
+- **Por código (recomendado):** copia una entrada en `Modulos > DefPersonajes`, cámbiale el nombre y elige piel, `Cuerpo` (escalas), `Cara`, `Pelo`, `Superior`, `Inferior`, `Calzado` y `Accesorios` (ver catálogo de Atuendos). Pulsa Play: `StoryServer` crea automáticamente los que falten (solo durante esa prueba). Para guardarlos en el lugar (o reconstruir los existentes tras cambiar su aspecto), ejecuta en la barra de comandos:
   ```lua
-  local m = game.ReplicatedStorage.StoryTemplate.Modulos; require(m.FabricaPersonajes:Clone()).ConstruirTodos(game.ReplicatedStorage.StoryTemplate.Personajes, require(m.DefPersonajes:Clone()))
+  local m = game.ReplicatedStorage.StoryTemplate.Modulos:Clone(); require(m.FabricaPersonajes).ConstruirTodos(game.ReplicatedStorage.StoryTemplate.Personajes); m:Destroy()
   ```
-  (El `:Clone()` evita que Studio use una versión antigua del módulo en caché.)
+  (Se clona la carpeta para que Studio no use versiones antiguas de los módulos en caché. Reconstruye **todos** los personajes de `DefPersonajes`.)
+- **Variantes de ropa:** para un pijama, uniforme, etc., copia la entrada con otro nombre (`Protagonista_Pijama`) y cambia solo la ropa. En la escena: `Reparto = { Protagonista = "Protagonista_Pijama" }`.
+- **Nuevas piezas de atuendo:** en `Modulos > Atuendos`, añade una función a `PIEZAS` (Parts soldadas a una parte del cuerpo) o una entrada a `Caras`, `Superiores` o `Inferiores`.
 - **A mano:** cualquier rig **R15** con `Humanoid` y `HumanoidRootPart` sirve (p. ej. *Avatar > Rig Builder*). Ponlo en `StoryTemplate > Personajes` con el nombre que quieras.
 
 ### Nuevo objeto
@@ -300,6 +320,7 @@ La composición es idéntica con cualquier tamaño de ventana: la cámara se cal
 | `No existe la escena 'X'` | El nombre en `Config.EscenaActiva` no coincide con el ModuleScript de `Escenas`. |
 | `El actor 'X' todavía no está en escena` | Falta un `Colocar` (o `Posiciones`, o `Caminar` con `Desde`) antes. |
 | `No encuentro 'X'` | Marca, actor u objeto mal escrito (distingue mayúsculas). |
+| Los tres personajes tienen la misma altura/anchura | Tu versión de Studio limita las escalas del cuerpo; la personalidad se mantiene por cara, ropa, `Barriga` y colores. |
 | Personajes sin crear tras instalar | Studio a veces no permite crearlos en modo edición; se crean solos al pulsar Play. Para guardarlos usa el comando de "Nuevo personaje". |
 | No suena el audio | El `Sound` de `Audio` tiene `SoundId` vacío o el audio no tiene permisos para tu experiencia. |
 | Los pies "patinan" | Ajusta `Config.VelocidadCaminar/Correr` o `VelocidadReferencia` en `Animaciones.Base`. |
